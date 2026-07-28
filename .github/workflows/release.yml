@@ -26,7 +26,7 @@ jobs:
       - name: Stamp version from tag
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          (cd client-mcp && npm version "$VERSION" --no-git-tag-version)
+          (cd client-mcp && npm version "$VERSION" --no-git-tag-version --allow-same-version)
           node -e "
             const fs = require('fs');
             const path = '.claude-plugin/plugin.json';
