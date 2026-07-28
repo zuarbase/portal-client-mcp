@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "zportal-client-mcp": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/client-mcp/dist/index.js"]
+    }
+  }
+}

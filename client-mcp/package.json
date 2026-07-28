@@ -1,0 +1,22 @@
+{
+  "name": "zuar-client-mcp",
+  "version": "0.2.0",
+  "description": "Client MCP: local stdio server multiplexing many Portal MCP servers into one deduplicated tool surface",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "npm run build && node --test \"test/**/*.test.mjs\""
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.6.0"
+  }
+}

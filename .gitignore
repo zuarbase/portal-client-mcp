@@ -1,0 +1,4 @@
+node_modules/
+client-mcp/dist/
+*.log
+.claude/settings.local.json
