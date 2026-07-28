@@ -50,20 +50,53 @@ To preconfigure the whole team, add to the portal monorepo's
 }
 ```
 
-## Dev setup
+## Making changes: from edit to users
 
-```bash
-cd client-mcp && npm install && npm test
-```
+1. **Develop.** Edit, then:
 
-Tests spin up fake Portal MCP instances in-process
-(`client-mcp/test/fixture-portal.mjs`) — no external services needed.
+   ```bash
+   cd client-mcp && npm install && npm test
+   ```
 
-Run Claude Code with the plugin:
+   `npm test` rebuilds (`tsc`) and runs the suite against fake
+   Portal MCP instances spun up in-process
+   (`test/fixture-portal.mjs`) — no external services. Skill and
+   manifest edits need no build at all.
 
-```bash
-claude --plugin-dir ~/workspace/zuar/portal-client-mcp
-```
+2. **Check by hand** (optional):
+
+   ```bash
+   claude --plugin-dir <path-to-this-repo>
+   ```
+
+   In an already-running session: rebuild if you skipped `npm test`,
+   then `/reload-plugins`.
+
+3. **Land it.** Commit to `main` (or branch + PR); CI runs the suite
+   on ubuntu/macos/windows.
+
+4. **Release** when the change should reach plugin users:
+
+   ```bash
+   git tag v0.3.0 && git push origin v0.3.0
+   ```
+
+   The tag IS the version — never bump versions by hand.
+   `release.yml` then: tests → self-contained esbuild bundle →
+   stamps the tag version into `client-mcp/package.json` and
+   `.claude-plugin/plugin.json` → force-pushes the `release` branch
+   (single commit; old blobs are GC'd, so history never grows). At
+   runtime `serverInfo.version` is read from `package.json`, with a
+   `0.0.0-dev` fallback outside packaged artifacts.
+
+5. **Users update** via `/plugin marketplace update zuar` (or
+   marketplace auto-update) and a session restart /
+   `/reload-plugins`.
+
+Mind the asymmetry: marketplace installs come from the `release`
+branch — pushes to `main` alone never reach users; your local
+`--plugin-dir` is the opposite — it sees the working tree and needs
+no tags, only a fresh `dist/`.
 
 ## Registering portals
 
@@ -99,17 +132,6 @@ Unbound sessions expose only the Client MCP's own tools
 first `use_portal` binds the session and emits `tools/list_changed`
 — Claude Code picks it up mid-session, Codex does not (verified
 2026-07): restart the session with an explicit portal instead.
-
-## Versioning and release stamping
-
-The single version source at runtime is `client-mcp/package.json` —
-`serverInfo.version` is read from it, with a `0.0.0-dev` fallback.
-The intended release flow (P3): CI, triggered by a git tag, stamps
-the tag version into `client-mcp/package.json` and
-`.claude-plugin/plugin.json` **inside the packaged artifact /
-release branch only** — no version-bump commits on main.
-`package-lock.json` is not hand-edited: `npm version` keeps it in
-sync when stamping.
 
 ## Known gaps (deliberate, tracked for productization)
 
