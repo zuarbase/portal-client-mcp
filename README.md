@@ -102,13 +102,18 @@ no tags, only a fresh `dist/`.
 
 In-session (Claude Code): `/zportal:connect` or the `add_portal`
 tool. Outside a session (required for Codex, which cannot refresh
-MCP tools mid-session):
+MCP tools mid-session) — the bundle is self-contained, so one
+downloaded file is the whole CLI, no clone or npm install:
 
 ```bash
-node client-mcp/dist/index.js add acme https://acme.example.com/mcp/ <api-key>
-node client-mcp/dist/index.js list
-node client-mcp/dist/index.js remove acme
+gh release download -R zuarbase/portal-client-mcp -p zportal.js
+node zportal.js add acme https://acme.example.com/mcp/ <api-key>
+node zportal.js list
+node zportal.js remove acme
 ```
+
+(From a working clone, `node client-mcp/dist/index.js` is the same
+binary.)
 
 Registry: `~/.zuar/portals.json` (override: `ZUAR_PORTAL_REGISTRY`),
 written with mode 600. Keychain/Credential Manager storage is
