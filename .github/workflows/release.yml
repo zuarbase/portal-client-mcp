@@ -1,0 +1,45 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client-mcp/package-lock.json
+      - run: npm ci
+        working-directory: client-mcp
+      - run: npm test
+        working-directory: client-mcp
+      - run: npm run bundle
+        working-directory: client-mcp
+      - name: Stamp version from tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          (cd client-mcp && npm version "$VERSION" --no-git-tag-version)
+          node -e "
+            const fs = require('fs');
+            const path = '.claude-plugin/plugin.json';
+            const manifest = JSON.parse(fs.readFileSync(path, 'utf8'));
+            manifest.version = process.argv[1];
+            fs.writeFileSync(path, JSON.stringify(manifest, null, 2) + '\n');
+          " "$VERSION"
+      - name: Publish release branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -B release
+          git add -f client-mcp/dist/index.js
+          git add client-mcp/package.json client-mcp/package-lock.json .claude-plugin/plugin.json
+          git commit -m "release ${GITHUB_REF_NAME}"
+          git push -f origin release

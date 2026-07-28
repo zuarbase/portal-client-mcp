@@ -21,6 +21,35 @@ older portals are not supported.
   registry, version groups, eager binding, tool dedup + `portal`
   enum param, proxying, upstream reconnection.
 
+## Install (team)
+
+The repo is its own plugin marketplace. In Claude Code:
+
+```
+/plugin marketplace add zuarbase/portal-client-mcp
+/plugin install zportal@zuar
+```
+
+Private-repo access uses your normal git credentials (SSH by
+default). Installs come from the `release` branch, which CI
+publishes on every `v*` tag: self-contained bundled server
+(`client-mcp/dist/index.js`, no node_modules needed) + versions
+stamped from the tag. `main` carries sources only.
+
+To preconfigure the whole team, add to the portal monorepo's
+`.claude/settings.json`:
+
+```json
+{
+  "extraKnownMarketplaces": {
+    "zuar": {
+      "source": {"source": "github", "repo": "zuarbase/portal-client-mcp"}
+    }
+  },
+  "enabledPlugins": {"zportal@zuar": true}
+}
+```
+
 ## Dev setup
 
 ```bash
