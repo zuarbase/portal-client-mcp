@@ -63,3 +63,22 @@ export function groupOf(version: string | undefined): string {
   const m = version.match(/^(\d+)\.(\d+)/);
   return m ? `${m[1]}.${m[2]}` : version;
 }
+
+/** Where zwaf's generic /services/<name>/ proxy exposes the Portal MCP. */
+const MCP_ENDPOINT_PATH = "/services/portal-mcp/mcp";
+
+/**
+ * Turn what an admin knows — their portal's URL — into the MCP
+ * endpoint. A URL that already carries a path is taken as given, so
+ * a non-standard deployment can still be registered verbatim.
+ */
+export function mcpEndpointUrl(input: string): string {
+  const trimmed = input.trim();
+  const url = new URL(
+    /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`,
+  );
+  if (url.pathname === "/" || url.pathname === "") {
+    url.pathname = MCP_ENDPOINT_PATH;
+  }
+  return url.toString();
+}

@@ -107,7 +107,7 @@ downloaded file is the whole CLI, no clone or npm install:
 
 ```bash
 gh release download -R zuarbase/portal-client-mcp -p zportal.js
-node zportal.js add acme https://acme.example.com/mcp/ <api-key>
+node zportal.js add acme https://acme.example.com <api-key>
 node zportal.js list
 node zportal.js remove acme
 ```

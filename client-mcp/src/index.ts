@@ -23,6 +23,7 @@ import {
   findCwdPin,
   groupOf,
   loadRegistry,
+  mcpEndpointUrl,
   saveRegistry,
   type Registry,
 } from "./registry.js";
@@ -242,15 +243,16 @@ async function runCli(cmd: string, rest: string[]): Promise<number> {
   if (cmd === "add") {
     const [alias, url, apiKey] = rest;
     if (!alias || !url || !apiKey) {
-      console.error("usage: index.js add <alias> <url> <api_key>");
+      console.error("usage: index.js add <alias> <portal_url> <api_key>");
       return 2;
     }
-    state.registry.portals[alias] = { url, apiKey };
+    const endpoint = mcpEndpointUrl(url);
+    state.registry.portals[alias] = { url: endpoint, apiKey };
     try {
       await connectPortal(alias);
     } catch (err) {
       delete state.registry.portals[alias];
-      console.error(`could not connect to ${url}: ${String(err)}`);
+      console.error(`could not connect to ${endpoint}: ${String(err)}`);
       return 1;
     }
     saveRegistry(state.registry);
@@ -318,7 +320,12 @@ const OWN_TOOLS: Tool[] = [
       type: "object",
       properties: {
         alias: { type: "string", description: "Short name, e.g. 'acme'" },
-        url: { type: "string", description: "Portal MCP endpoint URL" },
+        url: {
+          type: "string",
+          description:
+            "The portal's URL, e.g. https://acme.example.com — the MCP " +
+            "endpoint path is appended automatically.",
+        },
         api_key: { type: "string", description: "Admin API key for this portal" },
       },
       required: ["alias", "url", "api_key"],
@@ -396,7 +403,7 @@ async function handleOwnTool(
 
     case "add_portal": {
       const alias = String(args.alias);
-      const url = String(args.url);
+      const url = mcpEndpointUrl(String(args.url));
       const apiKey = String(args.api_key);
       state.registry.portals[alias] = { url, apiKey };
       try {

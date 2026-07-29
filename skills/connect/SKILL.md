@@ -8,7 +8,8 @@ disable-model-invocation: true
 Register a Zuar Portal instance with the Client MCP.
 
 1. Ask the user for:
-   - the portal base URL of its MCP endpoint,
+   - the portal's URL, e.g. `https://acme.example.com` (the MCP
+     endpoint path is appended automatically),
    - a short alias (suggest one from the hostname),
    - an admin API key (created in Portal UI under Auth → API keys).
 2. Call the `add_portal` tool with `alias`, `url`, `api_key`.
