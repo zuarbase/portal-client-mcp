@@ -13,11 +13,10 @@ accepts an optional `portal` argument selecting the target instance.
 1. If more than one portal is connected (`list_portals`), confirm with
    the user which portal the task targets. Never guess the target for
    a write.
-2. Read the version-matched guide from the MCP resource
-   `zportal://skills/authoring` and follow the workflow described
-   there. Topic guides (`zportal://skills/charts`, `.../blocks`,
-   `.../layout`, `.../theming`, `.../data-binding`) cover specifics —
-   read the relevant one before working in that area. If the portal
+2. Call the `get_skill` tool with topic `authoring` and follow the
+   workflow described there. Other topics (listed in the tool's
+   description) cover specifics — read the relevant one before
+   working in that area. If the portal
    publishes no such resources (older or in-development builds),
    say so and proceed with extra caution.
 

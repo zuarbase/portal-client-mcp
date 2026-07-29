@@ -90,7 +90,7 @@ test("client-mcp end to end", async (t) => {
     const r = await client.request("resources/read", {
       uri: "zportal://skills/authoring",
     });
-    assert.match(r.result.contents[0].text, /guide for 1\.20/);
+    assert.match(r.result.contents[0].text, /skills for 1\.20/);
   });
 
   client.close();

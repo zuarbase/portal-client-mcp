@@ -542,8 +542,8 @@ const server = new Server(
       "Client MCP for Zuar Portal instances. One deduplicated tool surface " +
       "serves every connected portal of the session's version group; portal " +
       "tools take an optional 'portal' argument. Start with list_portals; " +
-      "set a default with use_portal. Version-matched authoring guides are " +
-      "MCP resources (zportal://skills/...).",
+      "set a default with use_portal. Version-matched skills are served " +
+      "by each portal's get_skill tool.",
   },
 );
 

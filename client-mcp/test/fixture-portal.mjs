@@ -47,7 +47,7 @@ export async function startFakePortal({ portalName, version }) {
       resources: [
         {
           uri: "zportal://skills/authoring",
-          name: "Portal authoring guide",
+          name: "Portal authoring skill",
           mimeType: "text/markdown",
         },
       ],
@@ -57,7 +57,7 @@ export async function startFakePortal({ portalName, version }) {
         {
           uri: req.params.uri,
           mimeType: "text/markdown",
-          text: `guide for ${version}`,
+          text: `skills for ${version}`,
         },
       ],
     }));

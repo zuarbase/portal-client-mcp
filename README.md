@@ -16,7 +16,7 @@ older portals are not supported.
 - `.mcp.json` — registers the bundled Client MCP as server `zportal-client-mcp`
   (`node client-mcp/dist/index.js`).
 - `skills/` — thin version-agnostic skills; version-specific guidance
-  is served by portals as MCP resources (`zportal://skills/...`).
+  is served by each portal through its `get_skill` tool.
 - `client-mcp/` — the Client MCP (TypeScript, stdio): portal
   registry, version groups, eager binding, tool dedup + `portal`
   enum param, proxying, upstream reconnection.
