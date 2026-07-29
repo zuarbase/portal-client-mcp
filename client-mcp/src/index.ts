@@ -24,6 +24,7 @@ import {
   groupOf,
   loadRegistry,
   mcpEndpointUrl,
+  normalizePortalUrl,
   saveRegistry,
   type Registry,
 } from "./registry.js";
@@ -68,11 +69,14 @@ async function connectPortal(alias: string): Promise<Client> {
   const entry = state.registry.portals[alias];
   if (!entry) throw new Error(`unknown portal alias: ${alias}`);
   const client = new Client({ name: "zportal-client-mcp", version: CLIENT_MCP_VERSION });
-  const transport = new StreamableHTTPClientTransport(new URL(entry.url), {
-    requestInit: {
-      headers: { Authorization: `Bearer ${entry.apiKey}` },
+  const transport = new StreamableHTTPClientTransport(
+    new URL(mcpEndpointUrl(entry.url)),
+    {
+      requestInit: {
+        headers: { Authorization: `Bearer ${entry.apiKey}` },
+      },
     },
-  });
+  );
   await client.connect(transport);
   const serverVersion = client.getServerVersion()?.version;
   if (serverVersion && entry.version !== serverVersion) {
@@ -246,13 +250,14 @@ async function runCli(cmd: string, rest: string[]): Promise<number> {
       console.error("usage: index.js add <alias> <portal_url> <api_key>");
       return 2;
     }
-    const endpoint = mcpEndpointUrl(url);
-    state.registry.portals[alias] = { url: endpoint, apiKey };
+    state.registry.portals[alias] = { url: normalizePortalUrl(url), apiKey };
     try {
       await connectPortal(alias);
     } catch (err) {
       delete state.registry.portals[alias];
-      console.error(`could not connect to ${endpoint}: ${String(err)}`);
+      console.error(
+        `could not connect to ${mcpEndpointUrl(url)}: ${String(err)}`,
+      );
       return 1;
     }
     saveRegistry(state.registry);
@@ -403,7 +408,7 @@ async function handleOwnTool(
 
     case "add_portal": {
       const alias = String(args.alias);
-      const url = mcpEndpointUrl(String(args.url));
+      const url = normalizePortalUrl(String(args.url));
       const apiKey = String(args.api_key);
       state.registry.portals[alias] = { url, apiKey };
       try {

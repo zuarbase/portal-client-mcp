@@ -41,3 +41,19 @@ test("a port survives the rewrite", () => {
     "https://acme.example.com:8443/services/portal-mcp/mcp",
   );
 });
+
+test("normalizePortalUrl keeps the admin's input, path included", async () => {
+  const { normalizePortalUrl } = await import("../dist/registry.js");
+  assert.equal(
+    normalizePortalUrl("acme.example.com"),
+    "https://acme.example.com/",
+  );
+  assert.equal(
+    normalizePortalUrl(" https://acme.example.com "),
+    "https://acme.example.com/",
+  );
+  assert.equal(
+    normalizePortalUrl("http://127.0.0.1:8300/mcp"),
+    "http://127.0.0.1:8300/mcp",
+  );
+});

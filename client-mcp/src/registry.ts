@@ -68,15 +68,27 @@ export function groupOf(version: string | undefined): string {
 const MCP_ENDPOINT_PATH = "/services/portal-mcp/mcp";
 
 /**
- * Turn what an admin knows — their portal's URL — into the MCP
- * endpoint. A URL that already carries a path is taken as given, so
- * a non-standard deployment can still be registered verbatim.
+ * Normalize what an admin typed into a valid absolute URL, changing
+ * nothing else. This is what the registry stores: the endpoint path
+ * is derived at connect time (`mcpEndpointUrl`), so the path
+ * convention lives in code shipped with the plugin — not baked into
+ * every registry on every machine.
  */
-export function mcpEndpointUrl(input: string): string {
+export function normalizePortalUrl(input: string): string {
   const trimmed = input.trim();
   const url = new URL(
     /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`,
   );
+  return url.toString();
+}
+
+/**
+ * Turn a stored portal URL into the MCP endpoint to connect to. A
+ * URL that already carries a path is taken as given, so a
+ * non-standard deployment can still be registered verbatim.
+ */
+export function mcpEndpointUrl(portalUrl: string): string {
+  const url = new URL(normalizePortalUrl(portalUrl));
   if (url.pathname === "/" || url.pathname === "") {
     url.pathname = MCP_ENDPOINT_PATH;
   }
