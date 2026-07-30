@@ -1,6 +1,6 @@
 {
   "name": "zuar-client-mcp",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "description": "Client MCP: local stdio server multiplexing many Portal MCP servers into one deduplicated tool surface",
   "type": "module",
   "private": true,
