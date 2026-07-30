@@ -119,14 +119,56 @@ Registry: `~/.zuar/portals.json` (override: `ZUAR_PORTAL_REGISTRY`),
 written with mode 600. Keychain/Credential Manager storage is
 planned; the file is the interim store.
 
+## Headless runs (test harness, CI)
+
+A caller that cannot answer prompts and must not leave a key on disk
+hands the portal over in the environment instead:
+
+```bash
+ZUAR_PORTAL_URL=https://acme.example.com \
+ZUAR_PORTAL_API_KEY=<key> \
+  claude -p "..." --mcp-config mcp-config.json
+```
+
+That portal *replaces* the file registry for the process, so a run
+gets exactly the portal it was given and inherits nothing from
+whatever home directory it lands in. The session is bound to it from
+the first `tools/list` — no registration step, no unbound window.
+Nothing is written to disk, and `add_portal` / `remove_portal` refuse
+with an explanation rather than half-working.
+
+`ZUAR_PORTAL` names the alias if the caller cares what it is
+called (it shows up in tool arguments and reports); the default is
+`portal`. `ZUAR_PORTAL_URL` without `ZUAR_PORTAL_API_KEY` is a setup
+error and the server exits — a run must fail loudly at launch rather
+than after burning an agent turn.
+
+**The registration file holds no secret.** Credentials reach the
+server through the environment the caller already controls, so
+`mcp-config.json` is just:
+
+```json
+{
+  "mcpServers": {
+    "zportal-client-mcp": {
+      "command": "node",
+      "args": ["/path/to/zportal.js"]
+    }
+  }
+}
+```
+
+It is therefore safe to keep alongside run results.
+
 ## Session binding
 
 One session = one portal version group (`major.minor`). Eager
 binding at startup, in priority order:
 
-1. explicit portal — `--portal <alias>` server arg or `ZUAR_PORTAL`
+1. explicit portal — `--portal <alias>` server arg, `ZUAR_PORTAL`
    env var (works from any directory; the way to go for Codex):
-   `ZUAR_PORTAL=acme codex`
+   `ZUAR_PORTAL=acme codex` — or the portal supplied entirely by the
+   environment (see headless runs above);
 2. cwd pin — `.zuar-portal/config.json` with
    `{"default_portal": "<alias>"}`, searched upward from cwd
    (optional "folder per customer" convenience);

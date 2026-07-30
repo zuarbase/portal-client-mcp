@@ -10,13 +10,46 @@ export interface PortalEntry {
 
 export interface Registry {
   portals: Record<string, PortalEntry>;
+  /** Provided by the environment for this process; never persisted. */
+  ephemeral?: boolean;
 }
 
 const registryPath =
   process.env.ZUAR_PORTAL_REGISTRY ??
   path.join(os.homedir(), ".zuar", "portals.json");
 
+/** Alias for the env-provided portal when none is named. */
+const ENV_PORTAL_ALIAS = "portal";
+
+/**
+ * One portal handed over by the environment, for callers that cannot
+ * answer prompts and must not write a key to disk — a test-harness
+ * run, a CI job. The registration file such a caller writes can then
+ * reference the credential by env var name, holding no secret itself.
+ */
+function envRegistry(): Registry | null {
+  const url = process.env.ZUAR_PORTAL_URL?.trim();
+  if (!url) return null;
+  const apiKey = process.env.ZUAR_PORTAL_API_KEY?.trim();
+  if (!apiKey) {
+    throw new Error(
+      "ZUAR_PORTAL_URL is set without ZUAR_PORTAL_API_KEY: the " +
+        "portal to use is known but there is no key to reach it with.",
+    );
+  }
+  const alias = process.env.ZUAR_PORTAL?.trim() || ENV_PORTAL_ALIAS;
+  return {
+    portals: { [alias]: { url: normalizePortalUrl(url), apiKey } },
+    ephemeral: true,
+  };
+}
+
 export function loadRegistry(): Registry {
+  const fromEnv = envRegistry();
+  // The env portal replaces the file rather than adding to it: a
+  // headless run gets exactly the portal it was given, with nothing
+  // inherited from whoever's home directory it happens to run in.
+  if (fromEnv) return fromEnv;
   try {
     const raw = JSON.parse(fs.readFileSync(registryPath, "utf8"));
     if (raw && typeof raw.portals === "object") return raw;
@@ -27,6 +60,7 @@ export function loadRegistry(): Registry {
 }
 
 export function saveRegistry(reg: Registry): void {
+  if (reg.ephemeral) return;
   fs.mkdirSync(path.dirname(registryPath), { recursive: true });
   fs.writeFileSync(registryPath, JSON.stringify(reg, null, 2) + "\n", {
     mode: 0o600,

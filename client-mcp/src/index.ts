@@ -193,11 +193,19 @@ async function bindGroup(group: string): Promise<void> {
   log(`bound to version group ${group} (${aliases.join(", ")}), ${tools.length} upstream tools`);
 }
 
-/** Explicit session target: `--portal <alias>` argv or ZUAR_PORTAL env. */
+/**
+ * Explicit session target: `--portal <alias>` argv, ZUAR_PORTAL env,
+ * or the single portal the environment supplied — a headless caller
+ * that named a portal must never start unbound.
+ */
 function explicitPortal(): string | null {
   const idx = process.argv.indexOf("--portal");
   if (idx !== -1 && process.argv[idx + 1]) return process.argv[idx + 1];
-  return process.env.ZUAR_PORTAL ?? null;
+  if (process.env.ZUAR_PORTAL) return process.env.ZUAR_PORTAL;
+  if (state.registry.ephemeral) {
+    return Object.keys(state.registry.portals)[0] ?? null;
+  }
+  return null;
 }
 
 /**
@@ -239,7 +247,15 @@ async function eagerBind(): Promise<void> {
  * CLI registry management (`add`/`list`/`remove`) — sessions start
  * pre-populated, since Codex can't refresh tools mid-session.
  */
+const ENV_PROVIDED_MESSAGE =
+  "This session's portal comes from ZUAR_PORTAL_URL, so the registry " +
+  "is fixed for the process and cannot be changed from inside it.";
+
 async function runCli(cmd: string, rest: string[]): Promise<number> {
+  if (cmd !== "list" && state.registry.ephemeral) {
+    console.error(ENV_PROVIDED_MESSAGE);
+    return 2;
+  }
   if (cmd === "list") {
     console.log(JSON.stringify(portalSummary(), null, 2));
     return 0;
@@ -407,6 +423,9 @@ async function handleOwnTool(
     }
 
     case "add_portal": {
+      if (state.registry.ephemeral) {
+        return textResult(ENV_PROVIDED_MESSAGE, true);
+      }
       const alias = String(args.alias);
       const url = normalizePortalUrl(String(args.url));
       const apiKey = String(args.api_key);
@@ -450,6 +469,9 @@ async function handleOwnTool(
     }
 
     case "remove_portal": {
+      if (state.registry.ephemeral) {
+        return textResult(ENV_PROVIDED_MESSAGE, true);
+      }
       const alias = String(args.alias);
       const entry = state.registry.portals[alias];
       if (!entry) {
