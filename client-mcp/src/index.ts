@@ -20,6 +20,11 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 
 import {
+  ConnectFormError,
+  openBrowser,
+  requestApiKey,
+} from "./connect-form.js";
+import {
   findCwdPin,
   groupOf,
   loadRegistry,
@@ -251,6 +256,37 @@ const ENV_PROVIDED_MESSAGE =
   "This session's portal comes from ZUAR_PORTAL_URL, so the registry " +
   "is fixed for the process and cannot be changed from inside it.";
 
+async function registerPortal(
+  alias: string,
+  url: string,
+  apiKey: string,
+): Promise<number> {
+  state.registry.portals[alias] = { url: normalizePortalUrl(url), apiKey };
+  try {
+    await connectPortal(alias);
+  } catch (err) {
+    delete state.registry.portals[alias];
+    console.error(
+      `could not connect to ${mcpEndpointUrl(url)}: ${String(err)}`,
+    );
+    return 1;
+  }
+  saveRegistry(state.registry);
+  const entry = state.registry.portals[alias];
+  console.log(
+    JSON.stringify(
+      {
+        registered: alias,
+        version: entry.version,
+        group: groupOf(entry.version),
+      },
+      null,
+      2,
+    ),
+  );
+  return 0;
+}
+
 async function runCli(cmd: string, rest: string[]): Promise<number> {
   if (cmd !== "list" && state.registry.ephemeral) {
     console.error(ENV_PROVIDED_MESSAGE);
@@ -260,32 +296,28 @@ async function runCli(cmd: string, rest: string[]): Promise<number> {
     console.log(JSON.stringify(portalSummary(), null, 2));
     return 0;
   }
+  if (cmd === "connect") {
+    const [alias, url] = rest;
+    if (!alias || !url) {
+      console.error("usage: index.js connect <alias> <portal_url>");
+      return 2;
+    }
+    let apiKey: string;
+    try {
+      apiKey = await collectApiKey(normalizePortalUrl(url), alias);
+    } catch (err) {
+      console.error(String(err));
+      return 1;
+    }
+    return registerPortal(alias, url, apiKey);
+  }
   if (cmd === "add") {
     const [alias, url, apiKey] = rest;
     if (!alias || !url || !apiKey) {
       console.error("usage: index.js add <alias> <portal_url> <api_key>");
       return 2;
     }
-    state.registry.portals[alias] = { url: normalizePortalUrl(url), apiKey };
-    try {
-      await connectPortal(alias);
-    } catch (err) {
-      delete state.registry.portals[alias];
-      console.error(
-        `could not connect to ${mcpEndpointUrl(url)}: ${String(err)}`,
-      );
-      return 1;
-    }
-    saveRegistry(state.registry);
-    const entry = state.registry.portals[alias];
-    console.log(
-      JSON.stringify(
-        { registered: alias, version: entry.version, group: groupOf(entry.version) },
-        null,
-        2,
-      ),
-    );
-    return 0;
+    return registerPortal(alias, url, apiKey);
   }
   if (cmd === "remove") {
     const [alias] = rest;
@@ -300,7 +332,8 @@ async function runCli(cmd: string, rest: string[]): Promise<number> {
   }
   console.error(
     `unknown command: ${cmd}\n` +
-      "usage: index.js [add <alias> <url> <api_key> | list | remove <alias>]\n" +
+      "usage: index.js [connect <alias> <url> | add <alias> <url> <api_key>\n" +
+      "                 | list | remove <alias>]\n" +
       "       index.js [--portal <alias>]   (no command: run as MCP stdio server)",
   );
   return 2;
@@ -333,9 +366,11 @@ const OWN_TOOLS: Tool[] = [
     },
   },
   {
-    name: "add_portal",
+    name: "connect_portal",
     description:
-      "Register a Zuar Portal instance with the Client MCP and detect its version. " +
+      "Register a Zuar Portal instance. Opens a form in the user's browser " +
+      "where they enter the admin API key: the key goes straight to this " +
+      "client and is never a tool argument. Detects the portal version. " +
       "Binds the session to the portal's version group if the session is still unbound.",
     inputSchema: {
       type: "object",
@@ -347,9 +382,8 @@ const OWN_TOOLS: Tool[] = [
             "The portal's URL, e.g. https://acme.example.com — the MCP " +
             "endpoint path is appended automatically.",
         },
-        api_key: { type: "string", description: "Admin API key for this portal" },
       },
-      required: ["alias", "url", "api_key"],
+      required: ["alias", "url"],
       additionalProperties: false,
     },
   },
@@ -376,6 +410,26 @@ const OWN_TOOLS: Tool[] = [
     },
   },
 ];
+
+
+/** Ask for the key in a browser form; the model never sees it. */
+async function collectApiKey(url: string, alias: string): Promise<string> {
+  let formUrl = "";
+  const key = requestApiKey({
+    portalUrl: url,
+    alias,
+    onReady: (u) => {
+      formUrl = u;
+      log(`key form for ${alias}: ${u}`);
+    },
+  });
+  // Give listen() a tick so the URL exists before we launch a browser.
+  await new Promise((r) => setTimeout(r, 0));
+  if (formUrl && !(await openBrowser(formUrl))) {
+    log(`could not open a browser; open ${formUrl} to continue`);
+  }
+  return key;
+}
 
 function textResult(payload: unknown, isError = false) {
   const text =
@@ -422,13 +476,23 @@ async function handleOwnTool(
       return textResult(portalSummary(scope));
     }
 
-    case "add_portal": {
+    case "connect_portal": {
       if (state.registry.ephemeral) {
         return textResult(ENV_PROVIDED_MESSAGE, true);
       }
       const alias = String(args.alias);
       const url = normalizePortalUrl(String(args.url));
-      const apiKey = String(args.api_key);
+      let apiKey: string;
+      try {
+        apiKey = await collectApiKey(url, alias);
+      } catch (err) {
+        return textResult(
+          err instanceof ConnectFormError
+            ? `Nothing was registered: ${err.message}.`
+            : `Could not open the key form: ${String(err)}`,
+          true,
+        );
+      }
       state.registry.portals[alias] = { url, apiKey };
       try {
         state.clients.delete(alias);
@@ -500,6 +564,18 @@ async function handleOwnTool(
       const alias = String(args.alias);
       const entry = state.registry.portals[alias];
       if (!entry) return textResult(`unknown portal alias: ${alias}`, true);
+      if (!entry.version) {
+        // Its group is its version, and a registry entry can predate
+        // ever having reached the portal — ask it before deciding.
+        try {
+          await connectPortal(alias);
+        } catch (err) {
+          return textResult(
+            `Could not reach ${alias}: ${String(err)}`,
+            true,
+          );
+        }
+      }
       const group = groupOf(entry.version);
       if (state.boundGroup && group !== state.boundGroup) {
         return textResult(

@@ -100,17 +100,26 @@ no tags, only a fresh `dist/`.
 
 ## Registering portals
 
-In-session (Claude Code): `/zportal:connect` or the `add_portal`
-tool. Outside a session (required for Codex, which cannot refresh
-MCP tools mid-session) — the bundle is self-contained, so one
-downloaded file is the whole CLI, no clone or npm install:
+In-session (Claude Code): `/zportal:connect`, or the
+`connect_portal` tool directly. Both open a form on loopback where
+the admin types the API key, so **the key never passes through the
+conversation** — there is no tool parameter for it.
+
+Outside a session (required for Codex, which cannot refresh MCP
+tools mid-session) — the bundle is self-contained, so one downloaded
+file is the whole CLI, no clone or npm install:
 
 ```bash
 gh release download -R zuarbase/portal-client-mcp -p zportal.js
-node zportal.js add acme https://acme.example.com <api-key>
+node zportal.js connect acme https://acme.example.com   # same form
+node zportal.js add acme https://acme.example.com <key> # scripted
 node zportal.js list
 node zportal.js remove acme
 ```
+
+`connect` keeps the key out of shell history too; `add` takes it as
+an argument for scripted setup, where the operator has chosen where
+the secret comes from.
 
 (From a working clone, `node client-mcp/dist/index.js` is the same
 binary.)
@@ -134,7 +143,7 @@ That portal *replaces* the file registry for the process, so a run
 gets exactly the portal it was given and inherits nothing from
 whatever home directory it lands in. The session is bound to it from
 the first `tools/list` — no registration step, no unbound window.
-Nothing is written to disk, and `add_portal` / `remove_portal` refuse
+Nothing is written to disk, and `connect_portal` / `remove_portal` refuse
 with an explanation rather than half-working.
 
 `ZUAR_PORTAL` names the alias if the caller cares what it is
@@ -175,15 +184,13 @@ binding at startup, in priority order:
 3. a registry where all portals share one version group.
 
 Unbound sessions expose only the Client MCP's own tools
-(`list_portals`, `add_portal`, `use_portal`, `remove_portal`); the
+(`list_portals`, `connect_portal`, `use_portal`, `remove_portal`); the
 first `use_portal` binds the session and emits `tools/list_changed`
 — Claude Code picks it up mid-session, Codex does not (verified
 2026-07): restart the session with an explicit portal instead.
 
 ## Known gaps (deliberate, tracked for productization)
 
-- API key passes through the conversation in `/zportal:connect`
-  (production: loopback form so the key never enters the model).
 - Keys in a plain config file (mode 600); keychain later.
 - No cross-instance schema hash verification within a group yet.
 - No write binding-gate beyond the version group check.

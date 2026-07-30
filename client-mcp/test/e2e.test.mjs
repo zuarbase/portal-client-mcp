@@ -6,6 +6,31 @@ import path from "node:path";
 import { startFakePortal } from "./fixture-portal.mjs";
 import { ClientMcp } from "./driver.mjs";
 
+function registryWith(portals) {
+  const file = path.join(
+    fs.mkdtempSync(path.join(os.tmpdir(), "zuar-e2e-")),
+    "portals.json",
+  );
+  fs.writeFileSync(file, JSON.stringify({ portals }));
+  return file;
+}
+
+test("a session with no portals offers only the client's own tools", async () => {
+  const registry = registryWith({});
+  const client = new ClientMcp({ ZUAR_PORTAL_REGISTRY: registry });
+  await client.init();
+  const names = (await client.request("tools/list")).result.tools
+    .map((tool) => tool.name)
+    .sort();
+  assert.deepEqual(names, [
+    "connect_portal",
+    "list_portals",
+    "remove_portal",
+    "use_portal",
+  ]);
+  client.close();
+});
+
 test("client-mcp end to end", async (t) => {
   const acme = await startFakePortal({ portalName: "acme", version: "1.20.3" });
   const widgets = await startFakePortal({
@@ -16,46 +41,29 @@ test("client-mcp end to end", async (t) => {
     portalName: "globex",
     version: "1.21.0",
   });
-  const registry = path.join(
-    fs.mkdtempSync(path.join(os.tmpdir(), "zuar-e2e-")),
-    "portals.json",
-  );
+  t.after(async () => {
+    await Promise.all([acme.close(), widgets.close(), globex.close()]);
+  });
+
+  // Registration is covered by the CLI and connect-form tests; these
+  // cases are about routing, so they start from a written registry.
+  const registry = registryWith({
+    acme: { url: acme.url, apiKey: "k1", version: "1.20.3" },
+    widgets: { url: widgets.url, apiKey: "k2", version: "1.20.1" },
+    globex: { url: globex.url, apiKey: "k3", version: "1.21.0" },
+  });
 
   const client = new ClientMcp({ ZUAR_PORTAL_REGISTRY: registry });
   await client.init();
 
-  await t.test("unbound start exposes only own tools", async () => {
-    const r = await client.request("tools/list");
-    assert.deepEqual(
-      r.result.tools.map((x) => x.name).sort(),
-      ["add_portal", "list_portals", "remove_portal", "use_portal"],
-    );
-  });
-
-  await t.test("add_portal binds, dedups, injects portal enum", async () => {
-    let r = await client.call("add_portal", {
-      alias: "acme",
-      url: acme.url,
-      api_key: "k1",
-    });
-    assert.equal(r.isError, false);
-    r = await client.call("add_portal", {
-      alias: "widgets",
-      url: widgets.url,
-      api_key: "k2",
-    });
-    assert.equal(r.isError, false);
-    r = await client.call("add_portal", {
-      alias: "globex",
-      url: globex.url,
-      api_key: "k3",
-    });
-    assert.match(r.text, /differs from the session group/);
+  await t.test("binding a portal dedups and injects the enum", async () => {
+    const bound = await client.call("use_portal", { alias: "acme" });
+    assert.equal(bound.isError, false);
 
     const tools = (await client.request("tools/list")).result.tools;
-    const lp = tools.find((x) => x.name === "list_pages");
-    assert.ok(lp, "portal tools present after binding");
-    assert.deepEqual(lp.inputSchema.properties.portal.enum, [
+    const listPages = tools.find((tool) => tool.name === "list_pages");
+    assert.ok(listPages, "portal tools present after binding");
+    assert.deepEqual(listPages.inputSchema.properties.portal.enum, [
       "acme",
       "widgets",
     ]);
@@ -102,7 +110,7 @@ test("client-mcp end to end", async (t) => {
     });
     await c2.init();
     const names = (await c2.request("tools/list")).result.tools.map(
-      (x) => x.name,
+      (tool) => tool.name,
     );
     assert.ok(names.includes("list_pages"), "full toolset from first list");
     const r = await c2.call("get_portal_info", {});
@@ -119,10 +127,21 @@ test("client-mcp end to end", async (t) => {
     const r = await c3.call("remove_portal", { alias: "widgets" });
     assert.equal(r.isError, false);
     const tools = (await c3.request("tools/list")).result.tools;
-    const lp = tools.find((x) => x.name === "list_pages");
-    assert.deepEqual(lp.inputSchema.properties.portal.enum, ["acme"]);
+    const listPages = tools.find((tool) => tool.name === "list_pages");
+    assert.deepEqual(listPages.inputSchema.properties.portal.enum, ["acme"]);
     c3.close();
   });
+});
 
-  await Promise.all([acme.close(), widgets.close(), globex.close()]);
+test("a portal registered before it was ever reached learns its group", async (t) => {
+  const portal = await startFakePortal({ portalName: "late", version: "1.22.0" });
+  t.after(() => portal.close());
+  // No version recorded: the entry predates any successful connect.
+  const registry = registryWith({ late: { url: portal.url, apiKey: "k" } });
+
+  const client = new ClientMcp({ ZUAR_PORTAL_REGISTRY: registry });
+  await client.init();
+  const bound = JSON.parse((await client.call("use_portal", { alias: "late" })).text);
+  assert.equal(bound.bound_group, "1.22");
+  client.close();
 });

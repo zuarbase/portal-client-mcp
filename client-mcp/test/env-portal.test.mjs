@@ -44,10 +44,9 @@ test("the environment portal is bound from the first tools/list", async (t) => {
   });
 
   await t.test("the registry cannot be changed from inside", async () => {
-    const { isError, text } = await client.call("add_portal", {
+    const { isError, text } = await client.call("connect_portal", {
       alias: "other",
       url: "https://other.example.com",
-      api_key: "k",
     });
     assert.equal(isError, true);
     assert.match(text, /ZUAR_PORTAL_URL/);
