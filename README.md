@@ -27,7 +27,7 @@ The repo is its own plugin marketplace. In Claude Code:
 
 ```
 /plugin marketplace add zuarbase/portal-client-mcp
-/plugin install zportal@zuar
+/plugin install zportal@zuar-portal
 ```
 
 Private-repo access uses your normal git credentials (SSH by
@@ -46,7 +46,7 @@ To preconfigure the whole team, add to the portal monorepo's
       "source": {"source": "github", "repo": "zuarbase/portal-client-mcp"}
     }
   },
-  "enabledPlugins": {"zportal@zuar": true}
+  "enabledPlugins": {"zportal@zuar-portal": true}
 }
 ```
 
