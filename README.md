@@ -194,6 +194,14 @@ first `use_portal` binds the session and emits `tools/list_changed`
 - Keys in a plain config file (mode 600); keychain later.
 - No cross-instance schema hash verification within a group yet.
 - No write binding-gate beyond the version group check.
-- Upstream restart resilience is evict-reconnect-retry-once: a write
-  whose response was lost may execute twice (verify-and-adopt
-  deferred).
+- Upstream transport failures carry their cause in the error text
+  (`TypeError: fetch failed (ECONNRESET: socket hang up)`), and a call
+  is retried on a fresh connection only when that is safe: always when
+  the request provably never left (connection refused, host
+  unresolvable), and for reads when the connection broke mid-call, up
+  to three attempts, with pooled sockets bypassed for a minute after any
+  failure. A write that may have reached the portal is not repeated; the
+  error says so and names the check to run before retrying
+  (`list_change_sets` for the entity, or `list_entities` by name after
+  a `create_entity`). The client does not run that check itself
+  (verify-and-adopt still deferred).
