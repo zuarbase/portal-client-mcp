@@ -1,5 +1,5 @@
 {
   "name": "zportal",
   "description": "Zuar Portal plugin: Client MCP exposing one deduplicated tool surface for many portal instances",
-  "version": "0.2.0"
+  "version": "0.0.0-dev"
 }

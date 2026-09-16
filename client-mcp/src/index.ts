@@ -34,7 +34,8 @@ import {
   type Registry,
 } from "./registry.js";
 
-// Version source: package.json, stamped by CI from the git tag.
+// Version source: package.json. main carries 0.0.0-dev; CI stamps the tag
+// version into the release branch, so only a release reports a number.
 function resolveVersion(): string {
   try {
     const pkg = createRequire(import.meta.url)("../package.json") as {
