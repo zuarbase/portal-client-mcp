@@ -86,8 +86,10 @@ To preconfigure the whole team, add to the portal monorepo's
    stamps the tag version into `client-mcp/package.json` and
    `.claude-plugin/plugin.json` → force-pushes the `release` branch
    (single commit; old blobs are GC'd, so history never grows). At
-   runtime `serverInfo.version` is read from `package.json`, with a
-   `0.0.0-dev` fallback outside packaged artifacts.
+   runtime `serverInfo.version` is read from `package.json`. On
+   `main` both manifests say `0.0.0-dev`, so a checkout or
+   `--plugin-dir` run reports a development build, never a release
+   it is not; `client-mcp/test/version.test.mjs` guards that.
 
 5. **Users update** via `/plugin marketplace update zuar` (or
    marketplace auto-update) and a session restart /
