@@ -33,6 +33,14 @@ import {
   saveRegistry,
   type Registry,
 } from "./registry.js";
+import {
+  AmbiguousDeliveryError,
+  ambiguousDeliveryMessage,
+  classifyTransportFailure,
+  describeError,
+  noteConnectionFailure,
+  pooledSocketsSuspect,
+} from "./transport-errors.js";
 
 // Version source: package.json. main carries 0.0.0-dev; CI stamps the tag
 // version into the release branch, so only a release reports a number.
@@ -75,13 +83,20 @@ async function connectPortal(alias: string): Promise<Client> {
   const entry = state.registry.portals[alias];
   if (!entry) throw new Error(`unknown portal alias: ${alias}`);
   const client = new Client({ name: "zportal-client-mcp", version: CLIENT_MCP_VERSION });
+  const headers: Record<string, string> = { Authorization: `Bearer ${entry.apiKey}` };
+  if (pooledSocketsSuspect()) {
+    // After a VPN flap, fetch's keep-alive pool keeps handing out sockets
+    // that are already dead. Asking the portal to close each connection
+    // once it has answered keeps every socket out of the pool while the
+    // cooldown lasts, so the retries in withClient reach the portal on
+    // fresh ones. A request header rather than an undici Agent with
+    // keep-alive off: Node does not expose undici's Agent, and adding the
+    // undici package would break the self-contained bundle.
+    headers.Connection = "close";
+  }
   const transport = new StreamableHTTPClientTransport(
     new URL(mcpEndpointUrl(entry.url)),
-    {
-      requestInit: {
-        headers: { Authorization: `Bearer ${entry.apiKey}` },
-      },
-    },
+    { requestInit: { headers } },
   );
   await client.connect(transport);
   const serverVersion = client.getServerVersion()?.version;
@@ -100,27 +115,45 @@ function groupAliases(group: string): string[] {
     .sort();
 }
 
+const MAX_ATTEMPTS = 3;
+
+/** Drop the cached client for `alias` and close it. */
+async function evictClient(alias: string, client: Client | null): Promise<void> {
+  state.clients.delete(alias);
+  if (client) await client.close().catch(() => undefined);
+}
+
 /**
- * Evict-reconnect-retry-once on upstream failure; a write whose
- * response was lost may execute twice (see README gaps).
+ * Run `fn` against the portal's cached client, reconnecting on a fresh
+ * socket when the transport fails. Only a failure whose request
+ * provably never left this process is repeated: connection refused,
+ * host unresolvable, or a failed handshake, which never carries the
+ * call. That needs no knowledge of the tool. A connection that broke
+ * after the call was sent may have delivered it, so the call is not
+ * repeated, whatever the tool: it surfaces as AmbiguousDeliveryError
+ * and the caller decides. Anything the portal itself answered (a
+ * protocol error, a tool refusal, an HTTP status error) is passed
+ * through untouched. MAX_ATTEMPTS in total.
  */
-async function withClient<T>(
-  alias: string,
-  fn: (c: Client) => Promise<T>,
-): Promise<T> {
-  const client = await connectPortal(alias);
-  try {
-    return await fn(client);
-  } catch (err) {
-    log(`call to ${alias} failed (${String(err)}), reconnecting once`);
-    state.clients.delete(alias);
+async function withClient<T>(alias: string, fn: (c: Client) => Promise<T>): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    let client: Client | null = null;
     try {
-      await client.close();
-    } catch {
-      // already closed
+      client = await connectPortal(alias);
+      return await fn(client);
+    } catch (err) {
+      const failure = classifyTransportFailure(err);
+      if (failure === "not-transport") throw err;
+      noteConnectionFailure();
+      const neverSent = client === null || failure === "never-sent";
+      const retry = neverSent && attempt < MAX_ATTEMPTS;
+      log(
+        `call to ${alias} failed (${describeError(err)}), ` +
+          (retry ? `reconnecting (attempt ${attempt + 1} of ${MAX_ATTEMPTS})` : "giving up"),
+      );
+      await evictClient(alias, client);
+      if (!retry) throw neverSent ? err : new AmbiguousDeliveryError(err);
     }
-    const fresh = await connectPortal(alias);
-    return fn(fresh);
   }
 }
 
@@ -139,10 +172,12 @@ async function representativeAlias(): Promise<string> {
       return alias;
     } catch (err) {
       lastError = err;
-      log(`representative ${alias} unreachable: ${String(err)}`);
+      log(`representative ${alias} unreachable: ${describeError(err)}`);
     }
   }
-  throw new Error(`no reachable portal in group ${state.boundGroup}: ${String(lastError)}`);
+  throw new Error(
+    `no reachable portal in group ${state.boundGroup}: ${describeError(lastError)}`,
+  );
 }
 
 async function withRepresentative<T>(fn: (c: Client) => Promise<T>): Promise<T> {
@@ -231,7 +266,7 @@ async function eagerBind(): Promise<void> {
       await bindGroup(groupOf(state.registry.portals[alias].version));
       return;
     } catch (err) {
-      log(`bind to ${alias} failed: ${String(err)}`);
+      log(`bind to ${alias} failed: ${describeError(err)}`);
     }
   }
   const groups = new Set(
@@ -243,7 +278,7 @@ async function eagerBind(): Promise<void> {
       try {
         await bindGroup(group);
       } catch (err) {
-        log(`single-group bind failed: ${String(err)}`);
+        log(`single-group bind failed: ${describeError(err)}`);
       }
     }
   }
@@ -268,7 +303,7 @@ async function registerPortal(
   } catch (err) {
     delete state.registry.portals[alias];
     console.error(
-      `could not connect to ${mcpEndpointUrl(url)}: ${String(err)}`,
+      `could not connect to ${mcpEndpointUrl(url)}: ${describeError(err)}`,
     );
     return 1;
   }
@@ -307,7 +342,7 @@ async function runCli(cmd: string, rest: string[]): Promise<number> {
     try {
       apiKey = await collectApiKey(normalizePortalUrl(url), alias);
     } catch (err) {
-      console.error(String(err));
+      console.error(describeError(err));
       return 1;
     }
     return registerPortal(alias, url, apiKey);
@@ -490,7 +525,7 @@ async function handleOwnTool(
         return textResult(
           err instanceof ConnectFormError
             ? `Nothing was registered: ${err.message}.`
-            : `Could not open the key form: ${String(err)}`,
+            : `Could not open the key form: ${describeError(err)}`,
           true,
         );
       }
@@ -500,7 +535,7 @@ async function handleOwnTool(
         await connectPortal(alias);
       } catch (err) {
         delete state.registry.portals[alias];
-        return textResult(`Could not connect to ${url}: ${String(err)}`, true);
+        return textResult(`Could not connect to ${url}: ${describeError(err)}`, true);
       }
       saveRegistry(state.registry);
       const entry = state.registry.portals[alias];
@@ -572,7 +607,7 @@ async function handleOwnTool(
           await connectPortal(alias);
         } catch (err) {
           return textResult(
-            `Could not reach ${alias}: ${String(err)}`,
+            `Could not reach ${alias}: ${describeError(err)}`,
             true,
           );
         }
@@ -658,14 +693,16 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
   if (OWN_TOOLS.some((t) => t.name === name)) {
     return handleOwnTool(name, args);
   }
+  const { portal: _portal, ...forwarded } = args;
+  let alias = "";
   try {
-    const alias = resolveTarget(args);
-    const { portal: _portal, ...forwarded } = args;
-    return await withClient(alias, (c) =>
-      c.callTool({ name, arguments: forwarded }),
-    );
+    alias = resolveTarget(args);
+    return await withClient(alias, (c) => c.callTool({ name, arguments: forwarded }));
   } catch (err) {
-    return textResult(String(err), true);
+    if (err instanceof AmbiguousDeliveryError) {
+      return textResult(ambiguousDeliveryMessage(name, alias, forwarded, err.cause), true);
+    }
+    return textResult(describeError(err), true);
   }
 });
 

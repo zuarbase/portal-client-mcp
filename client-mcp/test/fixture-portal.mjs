@@ -32,6 +32,15 @@ export async function startFakePortal({ portalName, version }) {
           description: "List pages",
           inputSchema: { type: "object", properties: {} },
         },
+        {
+          // A write by name prefix, for the transport resilience tests.
+          name: "create_thing",
+          description: "Create a thing",
+          inputSchema: {
+            type: "object",
+            properties: { name: { type: "string" } },
+          },
+        },
       ],
     }));
     s.setRequestHandler(CallToolRequestSchema, async (req) => {
@@ -40,6 +49,9 @@ export async function startFakePortal({ portalName, version }) {
       }
       if (req.params.name === "list_pages") {
         return text({ portal: portalName, pages: ["home", "sales"] });
+      }
+      if (req.params.name === "create_thing") {
+        return text({ portal: portalName, created: req.params.arguments?.name ?? null });
       }
       throw new Error(`unknown tool ${req.params.name}`);
     });
