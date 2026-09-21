@@ -4,10 +4,9 @@ import assert from "node:assert/strict";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 
 import {
-  ambiguousWriteMessage,
+  ambiguousDeliveryMessage,
   classifyTransportFailure,
   describeError,
-  isWriteTool,
   noteConnectionFailure,
   pooledSocketsSuspect,
 } from "../dist/transport-errors.js";
@@ -102,50 +101,23 @@ test("classifyTransportFailure: anything the portal answered is not a transport 
   assert.equal(classifyTransportFailure(undefined), "not-transport");
 });
 
-const tool = (name, annotations) => ({
-  name,
-  inputSchema: { type: "object" },
-  ...(annotations ? { annotations } : {}),
-});
-
-test("isWriteTool trusts the tool's annotations over its name", () => {
-  assert.equal(isWriteTool("create_entity", [tool("create_entity", { readOnlyHint: true })]), false);
-  assert.equal(isWriteTool("get_entity", [tool("get_entity", { readOnlyHint: false })]), true);
-  assert.equal(isWriteTool("get_entity", [tool("get_entity", { destructiveHint: true })]), true);
-  // readOnlyHint wins over destructiveHint when both are set
-  assert.equal(
-    isWriteTool("purge", [tool("purge", { readOnlyHint: true, destructiveHint: true })]),
-    false,
-  );
-});
-
-test("isWriteTool falls back to the name prefix", () => {
-  const tools = [tool("create_entity"), tool("get_entity", {})];
-  for (const name of ["create_entity", "update_entity", "delete_entity", "place_blocks", "revert_change_set"]) {
-    assert.equal(isWriteTool(name, tools), true, name);
-  }
-  for (const name of ["get_entity", "list_entities", "execute_sql", "validate_entity", "get_portal_info"]) {
-    assert.equal(isWriteTool(name, tools), false, name);
-  }
-});
-
-test("ambiguousWriteMessage names the check and the entity when known", () => {
+test("ambiguousDeliveryMessage names the check and the entity when known", () => {
   const cause = fetchFailed("ECONNRESET", "socket hang up");
   assert.equal(
-    ambiguousWriteMessage("update_entity", "acme", { entity_type: "page", id: 42 }, cause),
-    "update_entity on acme failed after the request may have been delivered " +
-      "(TypeError: fetch failed (ECONNRESET: socket hang up)). The write may " +
-      "have applied: call list_change_sets for page 42 filtered to your own " +
-      "changes, newest first, before retrying. For create_entity, search " +
-      "list_entities by the name you sent.",
+    ambiguousDeliveryMessage("update_entity", "acme", { entity_type: "page", id: 42 }, cause),
+    "update_entity on acme: the connection broke after the request was sent " +
+      "(TypeError: fetch failed (ECONNRESET: socket hang up)), so it may have " +
+      "been delivered. Repeat a read as is. Before repeating a write, check " +
+      "whether it applied: list_change_sets for page 42, newest first; after " +
+      "a create_entity, list_entities by the name you sent.",
   );
   assert.match(
-    ambiguousWriteMessage("create_entity", "acme", { entity_type: "page", name: "Home" }, cause),
-    /call list_change_sets for page filtered to your own changes/,
+    ambiguousDeliveryMessage("create_entity", "acme", { entity_type: "page", name: "Home" }, cause),
+    /list_change_sets for page, newest first/,
   );
   assert.match(
-    ambiguousWriteMessage("place_blocks", "acme", {}, cause),
-    /call list_change_sets filtered to your own changes/,
+    ambiguousDeliveryMessage("get_portal_info", "acme", {}, cause),
+    /list_change_sets, newest first/,
   );
 });
 

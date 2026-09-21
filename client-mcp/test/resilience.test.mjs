@@ -109,7 +109,7 @@ async function refusedUrl() {
   return `http://127.0.0.1:${port}/`;
 }
 
-test("forwarded calls survive dead sockets without repeating writes", async (t) => {
+test("forwarded calls are repeated only when the request never left", async (t) => {
   const portal = await startFakePortal({ portalName: "acme", version: "1.20.3" });
   const proxy = await startFlakyProxy(portal.url);
   const registry = registryWith({
@@ -126,29 +126,45 @@ test("forwarded calls survive dead sockets without repeating writes", async (t) 
   const names = (await client.request("tools/list")).result.tools.map((x) => x.name);
   assert.ok(names.includes("create_thing"), "fixture offers a write-named tool");
 
-  await t.test("a read whose socket died is retried on a fresh connection", async () => {
+  await t.test("a call whose socket died after sending is not repeated", async () => {
     proxy.seen.length = 0;
     proxy.dropNext = 1;
-    const r = await client.call("get_portal_info", {});
+    const r = await client.call("create_thing", { entity_type: "thing", name: "widget" });
+    assert.equal(r.isError, true);
+    assert.match(
+      r.text,
+      /^create_thing on acme: the connection broke after the request was sent \(TypeError: fetch failed \((UND_ERR_SOCKET|ECONNRESET): /,
+    );
+    assert.match(r.text, /list_change_sets for thing, newest first/);
+    // sent once, no reconnect: the caller decides whether to repeat it
+    assert.deepEqual(proxy.seen.map((s) => s.method), ["tools/call"]);
+    console.log(`ambiguous delivery error text: ${r.text}`);
+  });
+
+  await t.test("the next call reconnects, and asks the server to close the socket", async () => {
+    proxy.seen.length = 0;
+    const r = await client.call("create_thing", { name: "widget" });
     assert.equal(r.isError, false, r.text);
-    assert.match(r.text, /"portal":"acme"/);
+    assert.match(r.text, /"created":"widget"/);
     assert.deepEqual(
       proxy.seen.map((s) => s.method),
-      ["tools/call", "initialize", "notifications/initialized", "tools/call"],
+      ["initialize", "notifications/initialized", "tools/call"],
     );
-  });
-
-  await t.test("after a failure, requests ask the server to close the socket", async () => {
-    const [first, ...rest] = proxy.seen;
-    assert.notEqual(first.connection, "close");
-    assert.ok(rest.length > 0);
     assert.ok(
-      rest.every((s) => s.connection === "close"),
-      JSON.stringify(rest),
+      proxy.seen.every((s) => s.connection === "close"),
+      JSON.stringify(proxy.seen),
     );
   });
 
-  await t.test("a read that keeps failing reports the cause code", async () => {
+  await t.test("a handshake that keeps failing is retried, then reports the cause code", async () => {
+    proxy.seen.length = 0;
+    proxy.dropAll = true;
+    // the first call after a failure reconnects: a dead handshake never
+    // carries the call, so it is safe to repeat up to three times
+    const r1 = await client.call("get_portal_info", {});
+    proxy.dropAll = false;
+    assert.equal(r1.isError, true);
+    assert.match(r1.text, /^get_portal_info on acme: the connection broke after the request was sent/);
     proxy.seen.length = 0;
     proxy.dropAll = true;
     const r = await client.call("get_portal_info", {});
@@ -156,39 +172,15 @@ test("forwarded calls survive dead sockets without repeating writes", async (t) 
     assert.equal(r.isError, true);
     assert.match(r.text, /^TypeError: fetch failed \((UND_ERR_SOCKET|ECONNRESET): /);
     assert.doesNotMatch(r.text, /may have been delivered/);
-    // three attempts in total: the call, then two reconnects that also died
     assert.deepEqual(
       proxy.seen.map((s) => s.method),
-      ["tools/call", "initialize", "initialize"],
+      ["initialize", "initialize", "initialize"],
     );
   });
 
   await t.test("the session recovers once the network is back", async () => {
     const r = await client.call("get_portal_info", {});
     assert.equal(r.isError, false, r.text);
-  });
-
-  await t.test("a write whose socket died is not resent and names the check", async () => {
-    proxy.seen.length = 0;
-    proxy.dropAll = true;
-    const r = await client.call("create_thing", { entity_type: "thing", name: "widget" });
-    proxy.dropAll = false;
-    assert.equal(r.isError, true);
-    assert.match(
-      r.text,
-      /^create_thing on acme failed after the request may have been delivered \(TypeError: fetch failed \((UND_ERR_SOCKET|ECONNRESET): /,
-    );
-    assert.match(r.text, /call list_change_sets for thing filtered to your own changes, newest first, before retrying/);
-    assert.equal(proxy.seen.filter((s) => s.tool === "create_thing").length, 1);
-    // no reconnect either: nothing was retried
-    assert.deepEqual(proxy.seen.map((s) => s.method), ["tools/call"]);
-    console.log(`ambiguous write error text: ${r.text}`);
-  });
-
-  await t.test("the same write goes through once the socket is healthy", async () => {
-    const r = await client.call("create_thing", { name: "widget" });
-    assert.equal(r.isError, false, r.text);
-    assert.match(r.text, /"created":"widget"/);
   });
 
   await t.test("a portal that refuses connections is retried even for writes", async () => {

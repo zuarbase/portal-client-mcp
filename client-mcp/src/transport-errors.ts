@@ -4,10 +4,9 @@
 // which calls Node's global fetch (undici). undici reports every
 // connection-level failure as a bare `TypeError: fetch failed` and keeps
 // the useful part — the socket error and its code — in `cause`. This
-// module reads that chain, decides whether a failed call can be repeated
-// safely, and tracks a cooldown during which pooled keep-alive sockets
-// are treated as suspect.
-import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+// module reads that chain, tells a request that never left from one
+// that may have been delivered, and tracks a cooldown during which
+// pooled keep-alive sockets are treated as suspect.
 
 export type TransportFailure = "never-sent" | "ambiguous" | "not-transport";
 
@@ -30,8 +29,6 @@ const AMBIGUOUS_CODES = new Set([
 
 /** How long pooled sockets stay suspect after a connection-level failure. */
 export const POOL_COOLDOWN_MS = 60_000;
-
-const WRITE_PREFIXES = ["create_", "update_", "delete_", "place_", "revert_"];
 
 interface ErrorLike {
   name?: unknown;
@@ -106,12 +103,11 @@ export function describeError(err: unknown): string {
 }
 
 /**
- * Whether a failed upstream call can be repeated. The deepest code in
- * the cause chain decides; a `fetch failed` TypeError or an AbortError
- * without a recognizable code is a broken connection of unknown timing.
- * Anything the portal itself answered — an MCP protocol error, a tool
- * refusal, an HTTP status error from the SDK — is not a transport
- * failure and must not be retried.
+ * Where a failed upstream call stands. The deepest code in the cause
+ * chain decides; a `fetch failed` TypeError or an AbortError without a
+ * recognizable code is a broken connection of unknown timing. Anything
+ * the portal itself answered — an MCP protocol error, a tool refusal,
+ * an HTTP status error from the SDK — is not a transport failure.
  */
 export function classifyTransportFailure(err: unknown): TransportFailure {
   const links = causeChain(err);
@@ -129,21 +125,7 @@ export function classifyTransportFailure(err: unknown): TransportFailure {
   return connectionBroke ? "ambiguous" : "not-transport";
 }
 
-/**
- * Whether a forwarded tool changes the portal. The upstream tool's
- * annotations decide when present (`readOnlyHint` first, then
- * `destructiveHint`); otherwise the name prefix does.
- */
-export function isWriteTool(name: string, tools: readonly Tool[]): boolean {
-  const annotations = tools.find((t) => t.name === name)?.annotations;
-  if (annotations?.readOnlyHint === true) return false;
-  if (annotations?.destructiveHint === true || annotations?.readOnlyHint === false) {
-    return true;
-  }
-  return WRITE_PREFIXES.some((prefix) => name.startsWith(prefix));
-}
-
-/** Thrown for a write that failed after its request may have reached the portal. */
+/** Thrown for a call that failed after its request may have reached the portal. */
 export class AmbiguousDeliveryError extends Error {
   constructor(cause: unknown) {
     super(`request may have been delivered (${describeError(cause)})`, { cause });
@@ -152,11 +134,13 @@ export class AmbiguousDeliveryError extends Error {
 }
 
 /**
- * The tool result for a write that may have applied: what failed, why,
- * and the check to run before retrying. The entity words come from the
- * call's own arguments and are left out when absent.
+ * The tool result for a call whose connection broke after the request
+ * was sent: what failed, why, and what to check before repeating it.
+ * The client does not know which tools write, so the advice is the
+ * same for every tool; a read is simply safe to repeat. The entity
+ * words come from the call's own arguments and are left out when absent.
  */
-export function ambiguousWriteMessage(
+export function ambiguousDeliveryMessage(
   tool: string,
   alias: string,
   args: Record<string, unknown>,
@@ -168,10 +152,11 @@ export function ambiguousWriteMessage(
     .join(" ");
   const target = entity ? ` for ${entity}` : "";
   return (
-    `${tool} on ${alias} failed after the request may have been delivered ` +
-    `(${describeError(cause)}). The write may have applied: call ` +
-    `list_change_sets${target} filtered to your own changes, newest first, ` +
-    `before retrying. For create_entity, search list_entities by the name you sent.`
+    `${tool} on ${alias}: the connection broke after the request was sent ` +
+    `(${describeError(cause)}), so it may have been delivered. Repeat a read ` +
+    `as is. Before repeating a write, check whether it applied: ` +
+    `list_change_sets${target}, newest first; after a create_entity, ` +
+    `list_entities by the name you sent.`
   );
 }
 

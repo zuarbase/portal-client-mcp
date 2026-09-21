@@ -35,10 +35,9 @@ import {
 } from "./registry.js";
 import {
   AmbiguousDeliveryError,
-  ambiguousWriteMessage,
+  ambiguousDeliveryMessage,
   classifyTransportFailure,
   describeError,
-  isWriteTool,
   noteConnectionFailure,
   pooledSocketsSuspect,
 } from "./transport-errors.js";
@@ -117,11 +116,6 @@ function groupAliases(group: string): string[] {
 
 const MAX_ATTEMPTS = 3;
 
-interface CallOptions {
-  /** False for writes: a call that may have reached the portal is not repeated. */
-  idempotent?: boolean;
-}
-
 /** Drop the cached client for `alias` and close it. */
 async function evictClient(alias: string, client: Client | null): Promise<void> {
   state.clients.delete(alias);
@@ -130,20 +124,17 @@ async function evictClient(alias: string, client: Client | null): Promise<void> 
 
 /**
  * Run `fn` against the portal's cached client, reconnecting on a fresh
- * socket when the transport fails. A failure whose request provably
- * never left this process (connection refused, host unresolvable, or a
- * failed handshake, which never carries the call) is retried for reads
- * and writes alike. A connection that broke mid-call may have delivered
- * the request: reads are retried, writes are not and surface as
- * AmbiguousDeliveryError. Anything the portal itself answered (a
+ * socket when the transport fails. Only a failure whose request
+ * provably never left this process is repeated: connection refused,
+ * host unresolvable, or a failed handshake, which never carries the
+ * call. That needs no knowledge of the tool. A connection that broke
+ * after the call was sent may have delivered it, so the call is not
+ * repeated, whatever the tool: it surfaces as AmbiguousDeliveryError
+ * and the caller decides. Anything the portal itself answered (a
  * protocol error, a tool refusal, an HTTP status error) is passed
  * through untouched. MAX_ATTEMPTS in total.
  */
-async function withClient<T>(
-  alias: string,
-  fn: (c: Client) => Promise<T>,
-  { idempotent = true }: CallOptions = {},
-): Promise<T> {
+async function withClient<T>(alias: string, fn: (c: Client) => Promise<T>): Promise<T> {
   for (let attempt = 1; ; attempt++) {
     let client: Client | null = null;
     try {
@@ -153,16 +144,14 @@ async function withClient<T>(
       const failure = classifyTransportFailure(err);
       if (failure === "not-transport") throw err;
       noteConnectionFailure();
-      const mayHaveBeenDelivered = client !== null && failure === "ambiguous";
-      const retry = attempt < MAX_ATTEMPTS && (idempotent || !mayHaveBeenDelivered);
+      const neverSent = client === null || failure === "never-sent";
+      const retry = neverSent && attempt < MAX_ATTEMPTS;
       log(
         `call to ${alias} failed (${describeError(err)}), ` +
           (retry ? `reconnecting (attempt ${attempt + 1} of ${MAX_ATTEMPTS})` : "giving up"),
       );
       await evictClient(alias, client);
-      if (!retry) {
-        throw mayHaveBeenDelivered && !idempotent ? new AmbiguousDeliveryError(err) : err;
-      }
+      if (!retry) throw neverSent ? err : new AmbiguousDeliveryError(err);
     }
   }
 }
@@ -707,14 +696,10 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
   let alias = "";
   try {
     alias = resolveTarget(args);
-    return await withClient(
-      alias,
-      (c) => c.callTool({ name, arguments: forwarded }),
-      { idempotent: !isWriteTool(name, state.upstreamTools) },
-    );
+    return await withClient(alias, (c) => c.callTool({ name, arguments: forwarded }));
   } catch (err) {
     if (err instanceof AmbiguousDeliveryError) {
-      return textResult(ambiguousWriteMessage(name, alias, forwarded, err.cause), true);
+      return textResult(ambiguousDeliveryMessage(name, alias, forwarded, err.cause), true);
     }
     return textResult(describeError(err), true);
   }
