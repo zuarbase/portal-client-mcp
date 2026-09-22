@@ -65,6 +65,8 @@ interface SessionState {
   defaultPortal: string | null;
   clients: Map<string, Client>;
   upstreamTools: Tool[];
+  /** The aliases the upstream tools' 'portal' enum currently offers. */
+  portalAliases: string[];
 }
 
 const state: SessionState = {
@@ -73,6 +75,7 @@ const state: SessionState = {
   defaultPortal: null,
   clients: new Map(),
   upstreamTools: [],
+  portalAliases: [],
 };
 
 function log(msg: string): void {
@@ -202,6 +205,26 @@ const DEFAULT_LIST_SCOPE: ListScope = "session";
 const PORTAL_PARAM_DESCRIPTION =
   "Target portal alias. Optional when a session default is set via use_portal.";
 
+/**
+ * Bring the upstream tools' 'portal' enum in line with the bound
+ * group's portals in the registry, and tell the host when it changed.
+ * The registry is shared with other sessions, so portals can appear
+ * in it or leave it without this session doing anything.
+ */
+async function syncPortalEnum(): Promise<void> {
+  if (state.defaultPortal && !state.registry.portals[state.defaultPortal]) {
+    state.defaultPortal = null;
+  }
+  if (!state.boundGroup) return;
+  const aliases = groupAliases(state.boundGroup);
+  if (aliases.join("\n") === state.portalAliases.join("\n")) return;
+  state.upstreamTools = state.upstreamTools.map((t) =>
+    injectPortalParam(t, aliases),
+  );
+  state.portalAliases = aliases;
+  await server.sendToolListChanged();
+}
+
 function injectPortalParam(tool: Tool, aliases: string[]): Tool {
   const schema = tool.inputSchema ?? { type: "object" as const };
   return {
@@ -241,6 +264,7 @@ async function bindGroup(group: string): Promise<void> {
   }
   const aliases = groupAliases(group);
   state.upstreamTools = tools.map((t) => injectPortalParam(t, aliases));
+  state.portalAliases = aliases;
   log(`bound to version group ${group} (${aliases.join(", ")}), ${tools.length} upstream tools`);
 }
 
@@ -570,10 +594,7 @@ async function handleOwnTool(
           `Registered, but its group ${group} differs from the session group ` +
           `${state.boundGroup} — usable only from a session bound to ${group}.`;
       } else {
-        state.upstreamTools = state.upstreamTools.map((t) =>
-          injectPortalParam(t, groupAliases(group)),
-        );
-        await server.sendToolListChanged();
+        await syncPortalEnum();
       }
       return textResult({
         registered: alias,
@@ -592,7 +613,6 @@ async function handleOwnTool(
       if (!entry) {
         return textResult(`unknown portal alias: ${alias}`, true);
       }
-      const group = groupOf(entry.version);
       updateRegistry(state.registry, (portals) => {
         delete portals[alias];
       });
@@ -601,14 +621,7 @@ async function handleOwnTool(
         state.clients.delete(alias);
         await client.close().catch(() => undefined);
       }
-      if (state.defaultPortal === alias) state.defaultPortal = null;
-      if (state.boundGroup === group) {
-        const aliases = groupAliases(group);
-        state.upstreamTools = state.upstreamTools.map((t) =>
-          injectPortalParam(t, aliases),
-        );
-        await server.sendToolListChanged();
-      }
+      await syncPortalEnum();
       return textResult({ removed: alias });
     }
 
@@ -705,6 +718,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 server.setRequestHandler(CallToolRequestSchema, async (req) => {
   await bindingPromise.catch(() => undefined);
   refreshRegistry(state.registry);
+  await syncPortalEnum();
   const name = req.params.name;
   const args = (req.params.arguments ?? {}) as Record<string, unknown>;
   if (OWN_TOOLS.some((t) => t.name === name)) {

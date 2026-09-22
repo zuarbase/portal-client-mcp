@@ -175,3 +175,39 @@ test("a session keeps portals other sessions registered after it started", async
   assert.equal(after.gamma.apiKey, "kg");
   client.close();
 });
+
+test("the portal enum follows portals other sessions add and remove", async (t) => {
+  const acme = await startFakePortal({ portalName: "acme", version: "1.20.3" });
+  const widgets = await startFakePortal({ portalName: "widgets", version: "1.20.1" });
+  t.after(async () => {
+    await Promise.all([acme.close(), widgets.close()]);
+  });
+  const registry = registryWith({
+    acme: { url: acme.url, apiKey: "k1", version: "1.20.3" },
+  });
+  const client = new ClientMcp({ ZUAR_PORTAL_REGISTRY: registry, ZUAR_PORTAL: "acme" });
+  await client.init();
+  const portalEnum = async () =>
+    (await client.request("tools/list")).result.tools.find(
+      (tool) => tool.name === "list_pages",
+    ).inputSchema.properties.portal.enum;
+  assert.deepEqual(await portalEnum(), ["acme"]);
+
+  // Other sessions write the file: widgets joins the group, acme leaves.
+  const writePortals = (portals) =>
+    fs.writeFileSync(registry, JSON.stringify({ portals }));
+  writePortals({
+    acme: { url: acme.url, apiKey: "k1", version: "1.20.3" },
+    widgets: { url: widgets.url, apiKey: "k2", version: "1.20.1" },
+  });
+  const r = await client.call("list_pages", { portal: "widgets" });
+  assert.match(r.text, /"portal":"widgets"/);
+  assert.deepEqual(await portalEnum(), ["acme", "widgets"]);
+
+  writePortals({ widgets: { url: widgets.url, apiKey: "k2", version: "1.20.1" } });
+  await client.call("list_portals");
+  assert.deepEqual(await portalEnum(), ["widgets"]);
+  // acme was the session default; with it gone the only portal left serves.
+  assert.match((await client.call("get_portal_info", {})).text, /"portal":"widgets"/);
+  client.close();
+});
