@@ -145,3 +145,33 @@ test("a portal registered before it was ever reached learns its group", async (t
   assert.equal(bound.bound_group, "1.22");
   client.close();
 });
+
+test("a session keeps portals other sessions registered after it started", async () => {
+  const registry = registryWith({
+    alpha: { url: "https://alpha.example/", apiKey: "ka", version: "1.21.0" },
+    beta: { url: "https://beta.example/", apiKey: "kb", version: "1.21.0" },
+  });
+  const client = new ClientMcp({ ZUAR_PORTAL_REGISTRY: registry });
+  await client.init();
+
+  // Another session registers gamma while this one is running.
+  const onDisk = JSON.parse(fs.readFileSync(registry, "utf8"));
+  onDisk.portals.gamma = {
+    url: "https://gamma.example/",
+    apiKey: "kg",
+    version: "1.21.0",
+  };
+  fs.writeFileSync(registry, JSON.stringify(onDisk));
+
+  const listed = JSON.parse(
+    (await client.call("list_portals", { scope: "all" })).text,
+  );
+  assert.deepEqual(Object.keys(listed.portals).sort(), ["alpha", "beta", "gamma"]);
+
+  const r = await client.call("remove_portal", { alias: "alpha" });
+  assert.equal(r.isError, false);
+  const after = JSON.parse(fs.readFileSync(registry, "utf8")).portals;
+  assert.deepEqual(Object.keys(after).sort(), ["beta", "gamma"]);
+  assert.equal(after.gamma.apiKey, "kg");
+  client.close();
+});

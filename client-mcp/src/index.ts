@@ -30,7 +30,9 @@ import {
   loadRegistry,
   mcpEndpointUrl,
   normalizePortalUrl,
-  saveRegistry,
+  refreshRegistry,
+  updateRegistry,
+  type PortalEntry,
   type Registry,
 } from "./registry.js";
 import {
@@ -102,7 +104,15 @@ async function connectPortal(alias: string): Promise<Client> {
   const serverVersion = client.getServerVersion()?.version;
   if (serverVersion && entry.version !== serverVersion) {
     entry.version = serverVersion;
-    saveRegistry(state.registry);
+    try {
+      updateRegistry(state.registry, (portals) => {
+        if (portals[alias]) portals[alias].version = serverVersion;
+      });
+    } catch (err) {
+      // The version is a cache of what the portal reports; failing to
+      // store it must not fail the connection that learned it.
+      log(`could not record ${alias} version: ${describeError(err)}`);
+    }
   }
   state.clients.set(alias, client);
   return client;
@@ -297,7 +307,8 @@ async function registerPortal(
   url: string,
   apiKey: string,
 ): Promise<number> {
-  state.registry.portals[alias] = { url: normalizePortalUrl(url), apiKey };
+  const entry: PortalEntry = { url: normalizePortalUrl(url), apiKey };
+  state.registry.portals[alias] = entry;
   try {
     await connectPortal(alias);
   } catch (err) {
@@ -307,8 +318,9 @@ async function registerPortal(
     );
     return 1;
   }
-  saveRegistry(state.registry);
-  const entry = state.registry.portals[alias];
+  updateRegistry(state.registry, (portals) => {
+    portals[alias] = entry;
+  });
   console.log(
     JSON.stringify(
       {
@@ -361,8 +373,9 @@ async function runCli(cmd: string, rest: string[]): Promise<number> {
       console.error(`unknown portal alias: ${alias}`);
       return 1;
     }
-    delete state.registry.portals[alias];
-    saveRegistry(state.registry);
+    updateRegistry(state.registry, (portals) => {
+      delete portals[alias];
+    });
     console.log(JSON.stringify({ removed: alias }));
     return 0;
   }
@@ -529,7 +542,8 @@ async function handleOwnTool(
           true,
         );
       }
-      state.registry.portals[alias] = { url, apiKey };
+      const entry: PortalEntry = { url, apiKey };
+      state.registry.portals[alias] = entry;
       try {
         state.clients.delete(alias);
         await connectPortal(alias);
@@ -537,8 +551,9 @@ async function handleOwnTool(
         delete state.registry.portals[alias];
         return textResult(`Could not connect to ${url}: ${describeError(err)}`, true);
       }
-      saveRegistry(state.registry);
-      const entry = state.registry.portals[alias];
+      updateRegistry(state.registry, (portals) => {
+        portals[alias] = entry;
+      });
       const group = groupOf(entry.version);
       let note = "";
       if (state.boundGroup === null) {
@@ -578,14 +593,15 @@ async function handleOwnTool(
         return textResult(`unknown portal alias: ${alias}`, true);
       }
       const group = groupOf(entry.version);
-      delete state.registry.portals[alias];
+      updateRegistry(state.registry, (portals) => {
+        delete portals[alias];
+      });
       const client = state.clients.get(alias);
       if (client) {
         state.clients.delete(alias);
         await client.close().catch(() => undefined);
       }
       if (state.defaultPortal === alias) state.defaultPortal = null;
-      saveRegistry(state.registry);
       if (state.boundGroup === group) {
         const aliases = groupAliases(group);
         state.upstreamTools = state.upstreamTools.map((t) =>
@@ -688,6 +704,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 
 server.setRequestHandler(CallToolRequestSchema, async (req) => {
   await bindingPromise.catch(() => undefined);
+  refreshRegistry(state.registry);
   const name = req.params.name;
   const args = (req.params.arguments ?? {}) as Record<string, unknown>;
   if (OWN_TOOLS.some((t) => t.name === name)) {
