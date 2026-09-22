@@ -46,7 +46,10 @@ test("updateRegistry keeps entries written after this copy was loaded", () => {
   });
   assert.deepEqual(Object.keys(loadRegistry().portals), ["b"]);
   assert.equal(loadRegistry().portals.b.apiKey, "kb");
-  assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  // Windows has no POSIX modes: every file reads back as 0666.
+  if (process.platform !== "win32") {
+    assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  }
 });
 
 test("updateRegistry refuses to overwrite a file it cannot parse", () => {
