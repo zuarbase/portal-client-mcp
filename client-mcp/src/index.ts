@@ -30,7 +30,9 @@ import {
   loadRegistry,
   mcpEndpointUrl,
   normalizePortalUrl,
-  saveRegistry,
+  refreshRegistry,
+  updateRegistry,
+  type PortalEntry,
   type Registry,
 } from "./registry.js";
 import {
@@ -63,6 +65,8 @@ interface SessionState {
   defaultPortal: string | null;
   clients: Map<string, Client>;
   upstreamTools: Tool[];
+  /** The aliases the upstream tools' 'portal' enum currently offers. */
+  portalAliases: string[];
 }
 
 const state: SessionState = {
@@ -71,10 +75,18 @@ const state: SessionState = {
   defaultPortal: null,
   clients: new Map(),
   upstreamTools: [],
+  portalAliases: [],
 };
 
 function log(msg: string): void {
   process.stderr.write(`[zportal-client-mcp] ${msg}\n`);
+}
+
+/** The url and key each cached client was opened with. */
+const clientTargets = new WeakMap<Client, string>();
+
+function targetOf(entry: PortalEntry): string {
+  return `${entry.url}\n${entry.apiKey}`;
 }
 
 async function connectPortal(alias: string): Promise<Client> {
@@ -102,8 +114,17 @@ async function connectPortal(alias: string): Promise<Client> {
   const serverVersion = client.getServerVersion()?.version;
   if (serverVersion && entry.version !== serverVersion) {
     entry.version = serverVersion;
-    saveRegistry(state.registry);
+    try {
+      updateRegistry(state.registry, (portals) => {
+        if (portals[alias]) portals[alias].version = serverVersion;
+      });
+    } catch (err) {
+      // The version is a cache of what the portal reports; failing to
+      // store it must not fail the connection that learned it.
+      log(`could not record ${alias} version: ${describeError(err)}`);
+    }
   }
+  clientTargets.set(client, targetOf(entry));
   state.clients.set(alias, client);
   return client;
 }
@@ -192,6 +213,33 @@ const DEFAULT_LIST_SCOPE: ListScope = "session";
 const PORTAL_PARAM_DESCRIPTION =
   "Target portal alias. Optional when a session default is set via use_portal.";
 
+/**
+ * Bring the session in line with the registry, which other sessions
+ * share and change: close clients for portals that were removed or
+ * re-registered with another url or key, forget a default that is
+ * gone, and rebuild the upstream tools' 'portal' enum. Returns whether
+ * the enum changed, so a caller outside tools/list can tell the host.
+ */
+async function syncWithRegistry(): Promise<boolean> {
+  for (const [alias, client] of state.clients) {
+    const entry = state.registry.portals[alias];
+    if (!entry || clientTargets.get(client) !== targetOf(entry)) {
+      await evictClient(alias, client);
+    }
+  }
+  if (state.defaultPortal && !state.registry.portals[state.defaultPortal]) {
+    state.defaultPortal = null;
+  }
+  if (!state.boundGroup) return false;
+  const aliases = groupAliases(state.boundGroup);
+  if (aliases.join("\n") === state.portalAliases.join("\n")) return false;
+  state.upstreamTools = state.upstreamTools.map((t) =>
+    injectPortalParam(t, aliases),
+  );
+  state.portalAliases = aliases;
+  return true;
+}
+
 function injectPortalParam(tool: Tool, aliases: string[]): Tool {
   const schema = tool.inputSchema ?? { type: "object" as const };
   return {
@@ -202,7 +250,10 @@ function injectPortalParam(tool: Tool, aliases: string[]): Tool {
         ...(schema.properties ?? {}),
         portal: {
           type: "string",
-          enum: aliases,
+          // An empty enum admits no value and is invalid under older
+          // JSON Schema drafts, which can make a host reject the whole
+          // tool list — so a group with no portals left gets none.
+          ...(aliases.length > 0 ? { enum: aliases } : {}),
           description: PORTAL_PARAM_DESCRIPTION,
         },
       },
@@ -231,6 +282,7 @@ async function bindGroup(group: string): Promise<void> {
   }
   const aliases = groupAliases(group);
   state.upstreamTools = tools.map((t) => injectPortalParam(t, aliases));
+  state.portalAliases = aliases;
   log(`bound to version group ${group} (${aliases.join(", ")}), ${tools.length} upstream tools`);
 }
 
@@ -297,7 +349,8 @@ async function registerPortal(
   url: string,
   apiKey: string,
 ): Promise<number> {
-  state.registry.portals[alias] = { url: normalizePortalUrl(url), apiKey };
+  const entry: PortalEntry = { url: normalizePortalUrl(url), apiKey };
+  state.registry.portals[alias] = entry;
   try {
     await connectPortal(alias);
   } catch (err) {
@@ -307,8 +360,9 @@ async function registerPortal(
     );
     return 1;
   }
-  saveRegistry(state.registry);
-  const entry = state.registry.portals[alias];
+  updateRegistry(state.registry, (portals) => {
+    portals[alias] = entry;
+  });
   console.log(
     JSON.stringify(
       {
@@ -361,8 +415,9 @@ async function runCli(cmd: string, rest: string[]): Promise<number> {
       console.error(`unknown portal alias: ${alias}`);
       return 1;
     }
-    delete state.registry.portals[alias];
-    saveRegistry(state.registry);
+    updateRegistry(state.registry, (portals) => {
+      delete portals[alias];
+    });
     console.log(JSON.stringify({ removed: alias }));
     return 0;
   }
@@ -529,16 +584,18 @@ async function handleOwnTool(
           true,
         );
       }
-      state.registry.portals[alias] = { url, apiKey };
+      const entry: PortalEntry = { url, apiKey };
+      state.registry.portals[alias] = entry;
       try {
-        state.clients.delete(alias);
+        await evictClient(alias, state.clients.get(alias) ?? null);
         await connectPortal(alias);
       } catch (err) {
         delete state.registry.portals[alias];
         return textResult(`Could not connect to ${url}: ${describeError(err)}`, true);
       }
-      saveRegistry(state.registry);
-      const entry = state.registry.portals[alias];
+      updateRegistry(state.registry, (portals) => {
+        portals[alias] = entry;
+      });
       const group = groupOf(entry.version);
       let note = "";
       if (state.boundGroup === null) {
@@ -554,10 +611,7 @@ async function handleOwnTool(
         note =
           `Registered, but its group ${group} differs from the session group ` +
           `${state.boundGroup} — usable only from a session bound to ${group}.`;
-      } else {
-        state.upstreamTools = state.upstreamTools.map((t) =>
-          injectPortalParam(t, groupAliases(group)),
-        );
+      } else if (await syncWithRegistry()) {
         await server.sendToolListChanged();
       }
       return textResult({
@@ -577,22 +631,10 @@ async function handleOwnTool(
       if (!entry) {
         return textResult(`unknown portal alias: ${alias}`, true);
       }
-      const group = groupOf(entry.version);
-      delete state.registry.portals[alias];
-      const client = state.clients.get(alias);
-      if (client) {
-        state.clients.delete(alias);
-        await client.close().catch(() => undefined);
-      }
-      if (state.defaultPortal === alias) state.defaultPortal = null;
-      saveRegistry(state.registry);
-      if (state.boundGroup === group) {
-        const aliases = groupAliases(group);
-        state.upstreamTools = state.upstreamTools.map((t) =>
-          injectPortalParam(t, aliases),
-        );
-        await server.sendToolListChanged();
-      }
+      updateRegistry(state.registry, (portals) => {
+        delete portals[alias];
+      });
+      if (await syncWithRegistry()) await server.sendToolListChanged();
       return textResult({ removed: alias });
     }
 
@@ -658,6 +700,14 @@ function resolveTarget(args: Record<string, unknown>): string {
   if (state.defaultPortal) return state.defaultPortal;
   const aliases = state.boundGroup ? groupAliases(state.boundGroup) : [];
   if (aliases.length === 1) return aliases[0];
+  if (aliases.length === 0) {
+    throw new Error(
+      state.boundGroup
+        ? `no portal of version group ${state.boundGroup} is registered any ` +
+            "more — connect one with connect_portal"
+        : "no portal connected — call use_portal or connect_portal first",
+    );
+  }
   throw new Error(
     "several portals are connected and no default is set — pass the 'portal' " +
       "argument or call use_portal first",
@@ -683,11 +733,16 @@ const server = new Server(
 
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   await bindingPromise.catch(() => undefined);
+  // The host is asking for the list: no need to tell it it changed.
+  refreshRegistry(state.registry);
+  await syncWithRegistry();
   return { tools: [...OWN_TOOLS, ...state.upstreamTools] };
 });
 
 server.setRequestHandler(CallToolRequestSchema, async (req) => {
   await bindingPromise.catch(() => undefined);
+  refreshRegistry(state.registry);
+  if (await syncWithRegistry()) await server.sendToolListChanged();
   const name = req.params.name;
   const args = (req.params.arguments ?? {}) as Record<string, unknown>;
   if (OWN_TOOLS.some((t) => t.name === name)) {

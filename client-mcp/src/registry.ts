@@ -51,20 +51,89 @@ export function loadRegistry(): Registry {
   // inherited from whoever's home directory it happens to run in.
   if (fromEnv) return fromEnv;
   try {
-    const raw = JSON.parse(fs.readFileSync(registryPath, "utf8"));
-    if (raw && typeof raw.portals === "object") return raw;
+    return readRegistryFile();
   } catch {
-    // missing or unreadable file → empty registry
+    // unreadable file → empty registry for reading
+    return { portals: {} };
   }
-  return { portals: {} };
 }
 
-export function saveRegistry(reg: Registry): void {
+/**
+ * Pick up what other sessions wrote to the file since this one last
+ * looked. Several sessions share one registry, so an in-memory copy
+ * taken at process start goes stale as soon as another one connects
+ * or removes a portal.
+ */
+export function refreshRegistry(reg: Registry): void {
   if (reg.ephemeral) return;
+  try {
+    reg.portals = readRegistryFile().portals;
+  } catch (err) {
+    // A half-written or hand-broken file: keep what we have rather
+    // than forget every portal until the next successful read.
+    process.stderr.write(
+      `[zportal-client-mcp] registry not refreshed: ${String(err)}\n`,
+    );
+  }
+}
+
+/**
+ * Apply one change to the registry — in memory and on disk. The disk
+ * side re-reads the file and applies the change to that, so entries
+ * other sessions wrote since this one started are kept rather than
+ * overwritten by this process's snapshot. `change` runs once against
+ * each copy, so it must only set or delete the entries it is about.
+ */
+export function updateRegistry(
+  reg: Registry,
+  change: (portals: Record<string, PortalEntry>) => void,
+): void {
+  if (!reg.ephemeral) {
+    // A file that exists but cannot be parsed throws here: writing our
+    // one change over it would wipe every other entry and its key.
+    const onDisk = readRegistryFile();
+    change(onDisk.portals);
+    writeRegistryFile(onDisk);
+  }
+  // Only once the file holds the change, so a failed write leaves
+  // memory agreeing with the disk.
+  change(reg.portals);
+}
+
+/** The registry file as it is now; empty if it does not exist yet. */
+function readRegistryFile(): Registry {
+  let text: string;
+  try {
+    text = fs.readFileSync(registryPath, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return { portals: {} };
+    }
+    throw err;
+  }
+  const raw = JSON.parse(text);
+  // An array would pass as an object, and the aliases set on it would
+  // silently vanish when it is written back as JSON.
+  if (
+    !raw ||
+    typeof raw.portals !== "object" ||
+    raw.portals === null ||
+    Array.isArray(raw.portals)
+  ) {
+    throw new Error(`${registryPath} has no "portals" object`);
+  }
+  return raw;
+}
+
+/**
+ * Write via a temp file and rename, so a session reading at the same
+ * moment sees the old file or the new one, never half of one.
+ */
+function writeRegistryFile(reg: Registry): void {
   fs.mkdirSync(path.dirname(registryPath), { recursive: true });
-  fs.writeFileSync(registryPath, JSON.stringify(reg, null, 2) + "\n", {
-    mode: 0o600,
-  });
+  const tmp = `${registryPath}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(reg, null, 2) + "\n", { mode: 0o600 });
+  fs.renameSync(tmp, registryPath);
 }
 
 /**

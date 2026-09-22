@@ -145,3 +145,101 @@ test("a portal registered before it was ever reached learns its group", async (t
   assert.equal(bound.bound_group, "1.22");
   client.close();
 });
+
+test("a session keeps portals other sessions registered after it started", async () => {
+  const registry = registryWith({
+    alpha: { url: "https://alpha.example/", apiKey: "ka", version: "1.21.0" },
+    beta: { url: "https://beta.example/", apiKey: "kb", version: "1.21.0" },
+  });
+  const client = new ClientMcp({ ZUAR_PORTAL_REGISTRY: registry });
+  await client.init();
+
+  // Another session registers gamma while this one is running.
+  const onDisk = JSON.parse(fs.readFileSync(registry, "utf8"));
+  onDisk.portals.gamma = {
+    url: "https://gamma.example/",
+    apiKey: "kg",
+    version: "1.21.0",
+  };
+  fs.writeFileSync(registry, JSON.stringify(onDisk));
+
+  const listed = JSON.parse(
+    (await client.call("list_portals", { scope: "all" })).text,
+  );
+  assert.deepEqual(Object.keys(listed.portals).sort(), ["alpha", "beta", "gamma"]);
+
+  const r = await client.call("remove_portal", { alias: "alpha" });
+  assert.equal(r.isError, false);
+  const after = JSON.parse(fs.readFileSync(registry, "utf8")).portals;
+  assert.deepEqual(Object.keys(after).sort(), ["beta", "gamma"]);
+  assert.equal(after.gamma.apiKey, "kg");
+  client.close();
+});
+
+test("the portal enum follows portals other sessions add and remove", async (t) => {
+  const acme = await startFakePortal({ portalName: "acme", version: "1.20.3" });
+  const widgets = await startFakePortal({ portalName: "widgets", version: "1.20.1" });
+  t.after(async () => {
+    await Promise.all([acme.close(), widgets.close()]);
+  });
+  const registry = registryWith({
+    acme: { url: acme.url, apiKey: "k1", version: "1.20.3" },
+  });
+  const client = new ClientMcp({ ZUAR_PORTAL_REGISTRY: registry, ZUAR_PORTAL: "acme" });
+  await client.init();
+  const portalEnum = async () =>
+    (await client.request("tools/list")).result.tools.find(
+      (tool) => tool.name === "list_pages",
+    ).inputSchema.properties.portal.enum;
+  assert.deepEqual(await portalEnum(), ["acme"]);
+
+  // Other sessions write the file: widgets joins the group, acme leaves.
+  const writePortals = (portals) =>
+    fs.writeFileSync(registry, JSON.stringify({ portals }));
+  writePortals({
+    acme: { url: acme.url, apiKey: "k1", version: "1.20.3" },
+    widgets: { url: widgets.url, apiKey: "k2", version: "1.20.1" },
+  });
+  // tools/list alone picks it up, with no tool call in between.
+  assert.deepEqual(await portalEnum(), ["acme", "widgets"]);
+  const r = await client.call("list_pages", { portal: "widgets" });
+  assert.match(r.text, /"portal":"widgets"/);
+
+  writePortals({ widgets: { url: widgets.url, apiKey: "k2", version: "1.20.1" } });
+  await client.call("list_portals");
+  assert.deepEqual(await portalEnum(), ["widgets"]);
+  // acme was the session default; with it gone the only portal left serves.
+  assert.match((await client.call("get_portal_info", {})).text, /"portal":"widgets"/);
+
+  writePortals({});
+  const tools = (await client.request("tools/list")).result.tools;
+  const portalParam = tools.find((tool) => tool.name === "list_pages")
+    .inputSchema.properties.portal;
+  assert.equal("enum" in portalParam, false);
+  const none = await client.call("get_portal_info", {});
+  assert.equal(none.isError, true);
+  assert.match(none.text, /no portal of version group 1\.20 is registered/);
+  client.close();
+});
+
+test("a portal re-registered elsewhere is reached at its new address", async (t) => {
+  const oldHost = await startFakePortal({ portalName: "old", version: "1.20.3" });
+  const newHost = await startFakePortal({ portalName: "new", version: "1.20.3" });
+  t.after(async () => {
+    await Promise.all([oldHost.close(), newHost.close()]);
+  });
+  const registry = registryWith({
+    acme: { url: oldHost.url, apiKey: "k1", version: "1.20.3" },
+  });
+  const client = new ClientMcp({ ZUAR_PORTAL_REGISTRY: registry, ZUAR_PORTAL: "acme" });
+  await client.init();
+  assert.match((await client.call("get_portal_info", {})).text, /"portal":"old"/);
+
+  // Another session registers acme again, now pointing elsewhere.
+  fs.writeFileSync(
+    registry,
+    JSON.stringify({ portals: { acme: { url: newHost.url, apiKey: "k2", version: "1.20.3" } } }),
+  );
+  assert.match((await client.call("get_portal_info", {})).text, /"portal":"new"/);
+  client.close();
+});
