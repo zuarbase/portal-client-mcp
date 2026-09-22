@@ -250,7 +250,10 @@ function injectPortalParam(tool: Tool, aliases: string[]): Tool {
         ...(schema.properties ?? {}),
         portal: {
           type: "string",
-          enum: aliases,
+          // An empty enum admits no value and is invalid under older
+          // JSON Schema drafts, which can make a host reject the whole
+          // tool list — so a group with no portals left gets none.
+          ...(aliases.length > 0 ? { enum: aliases } : {}),
           description: PORTAL_PARAM_DESCRIPTION,
         },
       },

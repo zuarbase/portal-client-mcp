@@ -212,6 +212,10 @@ test("the portal enum follows portals other sessions add and remove", async (t) 
   assert.match((await client.call("get_portal_info", {})).text, /"portal":"widgets"/);
 
   writePortals({});
+  const tools = (await client.request("tools/list")).result.tools;
+  const portalParam = tools.find((tool) => tool.name === "list_pages")
+    .inputSchema.properties.portal;
+  assert.equal("enum" in portalParam, false);
   const none = await client.call("get_portal_info", {});
   assert.equal(none.isError, true);
   assert.match(none.text, /no portal of version group 1\.20 is registered/);
