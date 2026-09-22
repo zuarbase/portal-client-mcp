@@ -82,6 +82,13 @@ function log(msg: string): void {
   process.stderr.write(`[zportal-client-mcp] ${msg}\n`);
 }
 
+/** The url and key each cached client was opened with. */
+const clientTargets = new WeakMap<Client, string>();
+
+function targetOf(entry: PortalEntry): string {
+  return `${entry.url}\n${entry.apiKey}`;
+}
+
 async function connectPortal(alias: string): Promise<Client> {
   const cached = state.clients.get(alias);
   if (cached) return cached;
@@ -117,6 +124,7 @@ async function connectPortal(alias: string): Promise<Client> {
       log(`could not record ${alias} version: ${describeError(err)}`);
     }
   }
+  clientTargets.set(client, targetOf(entry));
   state.clients.set(alias, client);
   return client;
 }
@@ -206,23 +214,30 @@ const PORTAL_PARAM_DESCRIPTION =
   "Target portal alias. Optional when a session default is set via use_portal.";
 
 /**
- * Bring the upstream tools' 'portal' enum in line with the bound
- * group's portals in the registry, and tell the host when it changed.
- * The registry is shared with other sessions, so portals can appear
- * in it or leave it without this session doing anything.
+ * Bring the session in line with the registry, which other sessions
+ * share and change: close clients for portals that were removed or
+ * re-registered with another url or key, forget a default that is
+ * gone, and rebuild the upstream tools' 'portal' enum. Returns whether
+ * the enum changed, so a caller outside tools/list can tell the host.
  */
-async function syncPortalEnum(): Promise<void> {
+async function syncWithRegistry(): Promise<boolean> {
+  for (const [alias, client] of state.clients) {
+    const entry = state.registry.portals[alias];
+    if (!entry || clientTargets.get(client) !== targetOf(entry)) {
+      await evictClient(alias, client);
+    }
+  }
   if (state.defaultPortal && !state.registry.portals[state.defaultPortal]) {
     state.defaultPortal = null;
   }
-  if (!state.boundGroup) return;
+  if (!state.boundGroup) return false;
   const aliases = groupAliases(state.boundGroup);
-  if (aliases.join("\n") === state.portalAliases.join("\n")) return;
+  if (aliases.join("\n") === state.portalAliases.join("\n")) return false;
   state.upstreamTools = state.upstreamTools.map((t) =>
     injectPortalParam(t, aliases),
   );
   state.portalAliases = aliases;
-  await server.sendToolListChanged();
+  return true;
 }
 
 function injectPortalParam(tool: Tool, aliases: string[]): Tool {
@@ -569,7 +584,7 @@ async function handleOwnTool(
       const entry: PortalEntry = { url, apiKey };
       state.registry.portals[alias] = entry;
       try {
-        state.clients.delete(alias);
+        await evictClient(alias, state.clients.get(alias) ?? null);
         await connectPortal(alias);
       } catch (err) {
         delete state.registry.portals[alias];
@@ -593,8 +608,8 @@ async function handleOwnTool(
         note =
           `Registered, but its group ${group} differs from the session group ` +
           `${state.boundGroup} — usable only from a session bound to ${group}.`;
-      } else {
-        await syncPortalEnum();
+      } else if (await syncWithRegistry()) {
+        await server.sendToolListChanged();
       }
       return textResult({
         registered: alias,
@@ -616,12 +631,7 @@ async function handleOwnTool(
       updateRegistry(state.registry, (portals) => {
         delete portals[alias];
       });
-      const client = state.clients.get(alias);
-      if (client) {
-        state.clients.delete(alias);
-        await client.close().catch(() => undefined);
-      }
-      await syncPortalEnum();
+      if (await syncWithRegistry()) await server.sendToolListChanged();
       return textResult({ removed: alias });
     }
 
@@ -687,6 +697,14 @@ function resolveTarget(args: Record<string, unknown>): string {
   if (state.defaultPortal) return state.defaultPortal;
   const aliases = state.boundGroup ? groupAliases(state.boundGroup) : [];
   if (aliases.length === 1) return aliases[0];
+  if (aliases.length === 0) {
+    throw new Error(
+      state.boundGroup
+        ? `no portal of version group ${state.boundGroup} is registered any ` +
+            "more — connect one with connect_portal"
+        : "no portal connected — call use_portal or connect_portal first",
+    );
+  }
   throw new Error(
     "several portals are connected and no default is set — pass the 'portal' " +
       "argument or call use_portal first",
@@ -712,13 +730,16 @@ const server = new Server(
 
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   await bindingPromise.catch(() => undefined);
+  // The host is asking for the list: no need to tell it it changed.
+  refreshRegistry(state.registry);
+  await syncWithRegistry();
   return { tools: [...OWN_TOOLS, ...state.upstreamTools] };
 });
 
 server.setRequestHandler(CallToolRequestSchema, async (req) => {
   await bindingPromise.catch(() => undefined);
   refreshRegistry(state.registry);
-  await syncPortalEnum();
+  if (await syncWithRegistry()) await server.sendToolListChanged();
   const name = req.params.name;
   const args = (req.params.arguments ?? {}) as Record<string, unknown>;
   if (OWN_TOOLS.some((t) => t.name === name)) {

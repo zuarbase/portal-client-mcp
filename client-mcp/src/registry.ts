@@ -88,13 +88,16 @@ export function updateRegistry(
   reg: Registry,
   change: (portals: Record<string, PortalEntry>) => void,
 ): void {
+  if (!reg.ephemeral) {
+    // A file that exists but cannot be parsed throws here: writing our
+    // one change over it would wipe every other entry and its key.
+    const onDisk = readRegistryFile();
+    change(onDisk.portals);
+    writeRegistryFile(onDisk);
+  }
+  // Only once the file holds the change, so a failed write leaves
+  // memory agreeing with the disk.
   change(reg.portals);
-  if (reg.ephemeral) return;
-  // A file that exists but cannot be parsed throws here: writing our
-  // one change over it would wipe every other entry and its key.
-  const onDisk = readRegistryFile();
-  change(onDisk.portals);
-  writeRegistryFile(onDisk);
 }
 
 /** The registry file as it is now; empty if it does not exist yet. */
@@ -109,7 +112,14 @@ function readRegistryFile(): Registry {
     throw err;
   }
   const raw = JSON.parse(text);
-  if (!raw || typeof raw.portals !== "object" || raw.portals === null) {
+  // An array would pass as an object, and the aliases set on it would
+  // silently vanish when it is written back as JSON.
+  if (
+    !raw ||
+    typeof raw.portals !== "object" ||
+    raw.portals === null ||
+    Array.isArray(raw.portals)
+  ) {
     throw new Error(`${registryPath} has no "portals" object`);
   }
   return raw;

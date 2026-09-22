@@ -61,6 +61,31 @@ test("updateRegistry refuses to overwrite a file it cannot parse", () => {
   assert.equal(fs.readFileSync(file, "utf8"), "{ not json");
 });
 
+test("a failed write leaves memory as it was", () => {
+  const file = process.env.ZUAR_PORTAL_REGISTRY;
+  fs.writeFileSync(file, "{ not json");
+  const reg = { portals: { a: { url: "http://a/", apiKey: "ka" } } };
+  assert.throws(() =>
+    updateRegistry(reg, (portals) => {
+      delete portals.a;
+    }),
+  );
+  assert.deepEqual(Object.keys(reg.portals), ["a"]);
+});
+
+test("a registry whose portals is an array is refused, not written to", () => {
+  const file = process.env.ZUAR_PORTAL_REGISTRY;
+  fs.writeFileSync(file, JSON.stringify({ portals: [] }));
+  assert.throws(
+    () =>
+      updateRegistry({ portals: {} }, (portals) => {
+        portals.c = { url: "http://c/", apiKey: "kc" };
+      }),
+    /no "portals" object/,
+  );
+  assert.equal(fs.readFileSync(file, "utf8"), JSON.stringify({ portals: [] }));
+});
+
 test("refreshRegistry picks up the file and keeps the copy on a bad read", () => {
   const file = process.env.ZUAR_PORTAL_REGISTRY;
   const reg = { portals: {} };
