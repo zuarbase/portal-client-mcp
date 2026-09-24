@@ -26,7 +26,7 @@ older portals are not supported.
 The repo is its own plugin marketplace. In Claude Code:
 
 ```
-/plugin marketplace add zuarbase/portal-client-mcp
+/plugin marketplace add zuarbase/zuar-portal-mcp-plugin
 /plugin install zportal@zuar-portal
 ```
 
@@ -43,7 +43,7 @@ To preconfigure the whole team, add to the portal monorepo's
 {
   "extraKnownMarketplaces": {
     "zuar": {
-      "source": {"source": "github", "repo": "zuarbase/portal-client-mcp"}
+      "source": {"source": "github", "repo": "zuarbase/zuar-portal-mcp-plugin"}
     }
   },
   "enabledPlugins": {"zportal@zuar-portal": true}
@@ -112,7 +112,7 @@ tools mid-session) — the bundle is self-contained, so one downloaded
 file is the whole CLI, no clone or npm install:
 
 ```bash
-gh release download -R zuarbase/portal-client-mcp -p zportal.js
+gh release download -R zuarbase/zuar-portal-mcp-plugin -p zportal.js
 node zportal.js connect acme https://acme.example.com   # same form
 node zportal.js add acme https://acme.example.com <key> # scripted
 node zportal.js list
