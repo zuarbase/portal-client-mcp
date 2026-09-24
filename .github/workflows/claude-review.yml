@@ -1,5 +1,15 @@
 name: Claude Review
 
+# Reviews each pull request with Claude and submits one formal review as
+# github-actions[bot]. Only high-severity correctness or security findings
+# block the merge; the review-accepted label releases the block. Claude has
+# no GitHub write access: it writes a JSON file, and claude_review.py posts
+# the review and decides the check result.
+#
+# This is a standalone copy of zuarbase/claude-review (v1, 2634ef3). Other
+# Zuar repos call that shared workflow; this public repo cannot call a
+# workflow in a private repo, so the workflow and script live here.
+
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
@@ -12,8 +22,111 @@ concurrency:
 
 jobs:
   review:
-    uses: zuarbase/claude-review/.github/workflows/review.yml@v1
-    secrets: inherit
-    with:
-      # portal-client-mcp's own Bedrock application inference profile.
-      model_arn: arn:aws:bedrock:us-east-1:575296055612:application-inference-profile/bx0ly46o5g12
+    # Skip drafts, pull requests from forks (their token cannot post reviews)
+    # and bot-authored pull requests such as dependabot. Label changes on a
+    # ready pull request are never skipped: a skipped job counts as passing
+    # and would release the block. Drafts cannot merge, so skipping them is
+    # safe, and marking one ready triggers a full review.
+    if: |
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.type != 'Bot'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write # AWS OIDC for Bedrock
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      ACTOR: ${{ github.event.sender.login }}
+      LABEL_EVENT: ${{ github.event.action == 'labeled' || github.event.action == 'unlabeled' }}
+      OVERRIDE_LABEL: review-accepted
+      BLOCKING_SEVERITIES: high
+      BLOCKING_CATEGORIES: correctness,security
+    steps:
+      - name: Checkout pull request
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      # The script comes from the base branch, never from the pull request,
+      # so a pull request cannot rewrite the script that grades it. The one
+      # exception is the pull request that first adds the script, when the
+      # base branch does not have it yet.
+      - name: Checkout review script from the base branch
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: .claude-review
+          sparse-checkout: .github/scripts
+          fetch-depth: 1
+
+      - name: Place review script
+        run: |
+          if [ ! -f .claude-review/.github/scripts/claude_review.py ]; then
+            echo "::warning::Base branch has no review script yet; using the pull request's copy."
+            mkdir -p .claude-review/.github/scripts
+            cp .github/scripts/claude_review.py .claude-review/.github/scripts/
+          fi
+
+      - name: Configure AWS credentials (OIDC)
+        if: env.LABEL_EVENT == 'false'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: us-east-1
+
+      - name: Run Claude review
+        if: env.LABEL_EVENT == 'false'
+        uses: anthropics/claude-code-action@v1
+        with:
+          use_bedrock: "true"
+          # The built-in Actions token, not the Claude GitHub App: the app
+          # cannot submit pull request reviews.
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            You are the automated reviewer for pull request #${{ github.event.pull_request.number }} in ${{ github.repository }}.
+            The pull request is checked out in the working directory.
+
+            Do this:
+            1. Run `gh pr view ${{ github.event.pull_request.number }} --json title,body,baseRefName,files` for context and `gh pr diff ${{ github.event.pull_request.number }}` for the full diff.
+            2. Read surrounding code where you need it to judge a change. Do not modify any file.
+            3. Write your review to `claude-review.json` in the working directory, as JSON with exactly this shape:
+
+               {
+                 "body": "summary in markdown",
+                 "findings": [
+                   {"path": "path/from/repo/root.py", "line": 42, "severity": "high", "category": "correctness", "body": "comment in markdown"}
+                 ]
+               }
+
+            Report every finding you are confident about, at most 20. Classify each one:
+            - severity: "high" only for a defect that will cause wrong behavior, data loss, a security hole, or a regression in shipped functionality, with a concrete failure scenario stated in the comment. "medium" for a likely problem you cannot fully confirm or that only affects edge cases. "low" for everything else.
+            - category: one of correctness, security, performance, tests, style, structure, naming, duplication, docs.
+            Only high-severity correctness or security findings block the merge. Everything else is advisory, so do not inflate severity to make a point.
+
+            Finding rules:
+            - "line" is the line number in the new version of the file and must be a line shown in the diff (an added or context line inside a hunk). Never reference lines outside the diff.
+            - One finding per issue, on the most relevant line. Say what is wrong and, when it is short, how to fix it.
+            - Anything that does not belong on one line goes in "body".
+
+            Summary body: two to six sentences on what the change does and your overall assessment. Do not repeat the findings, do not state a verdict, and do not add a heading or a sign-off.
+
+            The file must be strict JSON. Inside string values use single quotes or backticks instead of double quotes, and write line breaks as \n, never as a literal newline. After writing the file run exactly `python3 -m json.tool claude-review.json`; if it reports an error, fix the file and run it again until it passes.
+
+            Never post to GitHub yourself; the workflow submits the file as the review. Write the file even when the pull request looks fine.
+          claude_args: |
+            --model ${{ secrets.BEDROCK_MODEL_ARN }}
+            --allowedTools "Bash(gh pr view:*),Bash(gh pr diff:*),Bash(python3 -m json.tool claude-review.json),Read,Glob,Grep,Write"
+
+      - name: Submit review
+        if: ${{ !cancelled() && env.LABEL_EVENT == 'false' }}
+        run: python3 .claude-review/.github/scripts/claude_review.py submit claude-review.json
+
+      - name: Check gate
+        if: ${{ !cancelled() }}
+        run: python3 .claude-review/.github/scripts/claude_review.py gate
