@@ -10,7 +10,7 @@
       "description": "Zuar Portal Client MCP: one deduplicated tool surface for many portal instances",
       "source": {
         "source": "github",
-        "repo": "zuarbase/portal-client-mcp",
+        "repo": "zuarbase/zuar-portal-mcp-plugin",
         "ref": "release"
       }
     }
