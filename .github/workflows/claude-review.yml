@@ -14,3 +14,6 @@ jobs:
   review:
     uses: zuarbase/claude-review/.github/workflows/review.yml@v1
     secrets: inherit
+    with:
+      # portal-client-mcp's own Bedrock application inference profile.
+      model_arn: arn:aws:bedrock:us-east-1:575296055612:application-inference-profile/bx0ly46o5g12
