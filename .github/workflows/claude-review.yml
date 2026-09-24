@@ -1,0 +1,16 @@
+name: Claude Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  # A new push cancels a review still running for the same pull request.
+  # Label changes only re-check the gate, so they wait instead of cancelling.
+  cancel-in-progress: ${{ github.event.action != 'labeled' && github.event.action != 'unlabeled' }}
+
+jobs:
+  review:
+    uses: zuarbase/claude-review/.github/workflows/review.yml@v1
+    secrets: inherit
