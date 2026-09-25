@@ -2,13 +2,21 @@
 """Submit Claude's review to a pull request and gate the check on it.
 
 Subcommands:
+  start               Open the CHECK_NAME check on HEAD_SHA as in progress,
+                      naming who requested the review.
   submit REVIEW_JSON  Post the findings Claude wrote as one pull request
                       review, then record which findings block in GATE_FILE.
                       Exits non-zero only when nothing could be posted.
-  gate                Exit 0 when the pull request may merge: the override
-                      label is present, or the review for the current
-                      commit completed without blocking findings. Exit 1
-                      otherwise.
+  gate                Complete the CHECK_NAME check on HEAD_SHA: success
+                      when the override label is present, or the review for
+                      that commit completed without blocking findings;
+                      failure otherwise. Exits non-zero only when the check
+                      could not be written.
+
+The result goes on the pull request as a check run rather than as this
+job's own result, because a review requested by a comment runs outside
+the pull request's context: a job started by a comment reports against
+the default branch, where a required check would never see it.
 
 Environment:
   GH_TOKEN             token the gh CLI uses to call the GitHub API
@@ -25,6 +33,10 @@ Environment:
                        (default: correctness,security)
   GATE_FILE            where submit records its result for gate
                        (default: claude-gate.json)
+  CHECK_NAME           name of the check run gate writes; branch rules
+                       require it (default: review)
+  CHECK_FILE           where start records the check run id for gate
+                       (default: claude-check.json)
 
 REVIEW_JSON has this shape:
   {"body": "summary markdown",
@@ -102,6 +114,8 @@ class Settings:
             environ.get("BLOCKING_CATEGORIES") or "correctness,security"
         )
         self.gate_file = environ.get("GATE_FILE") or "claude-gate.json"
+        self.check_name = environ.get("CHECK_NAME") or "review"
+        self.check_file = environ.get("CHECK_FILE") or "claude-check.json"
 
 
 def _csv_set(text: str) -> set[str]:
@@ -204,6 +218,37 @@ def post_review(
         method="POST",
         payload=payload,
     )
+
+
+def write_check(
+    settings: Settings, fields: dict[str, Any]
+) -> tuple[bool, Any, str]:
+    """Update the check run start opened, or create one when there is none."""
+    check_id = read_check_id(settings)
+    if check_id:
+        return gh_api(
+            f"repos/{settings.repo}/check-runs/{check_id}",
+            method="PATCH",
+            payload=fields,
+        )
+    return gh_api(
+        f"repos/{settings.repo}/check-runs",
+        method="POST",
+        payload={
+            "name": settings.check_name,
+            "head_sha": settings.head_sha,
+            **fields,
+        },
+    )
+
+
+def read_check_id(settings: Settings) -> int | None:
+    try:
+        with open(settings.check_file, encoding="utf-8") as handle:
+            check_id = json.load(handle).get("id")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return check_id if isinstance(check_id, int) else None
 
 
 # --- Review construction --------------------------------------------------
@@ -411,6 +456,32 @@ def dismiss_changes_requested(settings: Settings) -> bool:
 # --- Subcommands ----------------------------------------------------------
 
 
+def start(settings: Settings) -> int:
+    who = f"@{settings.actor}" if settings.actor else "a comment"
+    ok, body, error = gh_api(
+        f"repos/{settings.repo}/check-runs",
+        method="POST",
+        payload={
+            "name": settings.check_name,
+            "head_sha": settings.head_sha,
+            "status": "in_progress",
+            "output": {
+                "title": "Claude review in progress",
+                "summary": f"Review requested by {who}.",
+            },
+        },
+    )
+    if not ok:
+        log(
+            f"::warning::Could not open the {settings.check_name} check: "
+            f"{error}"
+        )
+        return 0
+    with open(settings.check_file, "w", encoding="utf-8") as handle:
+        json.dump({"id": body.get("id")}, handle)
+    return 0
+
+
 def submit_incomplete(settings: Settings, error: str, text: str | None) -> int:
     """Post a notice that no usable review exists and record it."""
     body = (
@@ -491,52 +562,72 @@ def submit(settings: Settings, review_path: str) -> int:
 
 
 def gate(settings: Settings) -> int:
-    if settings.label in pr_labels(settings):
-        dismissed = dismiss_changes_requested(settings)
-        note = f"The `{settings.label}` label is present; the check passes."
-        if dismissed:
-            note += " Dismissed the earlier changes-requested review."
-        log(f"::notice::{note}")
-        return 0
-
-    state = read_gate_file(settings) or read_gate_from_reviews(settings)
-    short_sha = settings.head_sha[:7] or "the current commit"
-    escape = f"or add the `{settings.label}` label to merge anyway"
-    if state is None:
+    passed, title, lines = gate_result(settings)
+    summary = "\n".join(lines)
+    ok, _, error = write_check(
+        settings,
+        {
+            "status": "completed",
+            "conclusion": "success" if passed else "failure",
+            "output": {"title": title, "summary": summary},
+        },
+    )
+    level = "notice" if passed else "warning"
+    log(f"::{level}::{title}")
+    for line in lines:
+        log(f"  {line}")
+    if not ok:
         log(
-            f"::error::No completed review found for {short_sha}. "
-            f"Re-run the workflow, {escape}."
+            f"::error::Could not write the {settings.check_name} check: "
+            f"{error}"
         )
         return 1
-    if state.get("status") == "incomplete":
-        log(
-            f"::error::The review did not complete for {short_sha}. "
-            f"Re-run the workflow, {escape}."
-        )
-        return 1
-    if state.get("status") == "blocking":
-        count = state.get("count", 0)
-        log(
-            f"::error::{count} blocking finding(s) on {short_sha}. "
-            f"Fix them, {escape}."
-        )
-        for finding in state.get("blocking", []):
-            log(
-                f"  {finding['path']}:{finding['line']} "
-                f"({finding['severity']} {finding['category']})"
-            )
-        return 1
-    log("No blocking findings; the check passes.")
     return 0
 
 
+def gate_result(settings: Settings) -> tuple[bool, str, list[str]]:
+    """Decide the check: (passed, title, detail lines)."""
+    if settings.label in pr_labels(settings):
+        dismissed = dismiss_changes_requested(settings)
+        lines = [f"The `{settings.label}` label is present."]
+        if dismissed:
+            lines.append("Dismissed the earlier changes-requested review.")
+        return True, "Merge allowed by label", lines
+
+    state = read_gate_file(settings) or read_gate_from_reviews(settings)
+    short_sha = settings.head_sha[:7] or "the current commit"
+    escape = (
+        "Comment `@claude` on the pull request to request a review, "
+        f"or add the `{settings.label}` label to merge anyway."
+    )
+    if state is None:
+        return False, f"No review for {short_sha}", [escape]
+    if state.get("status") == "incomplete":
+        return False, f"Review did not complete for {short_sha}", [escape]
+    if state.get("status") == "blocking":
+        count = state.get("count", 0)
+        lines = [
+            f"- `{finding['path']}:{finding['line']}` "
+            f"({finding['severity']} {finding['category']})"
+            for finding in state.get("blocking", [])
+        ]
+        lines.append(
+            f"Fix them and comment `@claude` again, or add the "
+            f"`{settings.label}` label to merge anyway."
+        )
+        return False, f"{count} blocking finding(s) on {short_sha}", lines
+    return True, "No blocking findings", [f"Reviewed {short_sha}."]
+
+
 def main(argv: list[str]) -> int:
+    if len(argv) == 2 and argv[1] == "start":
+        return start(Settings(os.environ))
     if len(argv) == 3 and argv[1] == "submit":
         return submit(Settings(os.environ), argv[2])
     if len(argv) == 2 and argv[1] == "gate":
         return gate(Settings(os.environ))
     sys.stderr.write(
-        "usage: claude_review.py submit REVIEW_JSON | claude_review.py gate\n"
+        "usage: claude_review.py start | submit REVIEW_JSON | gate\n"
     )
     return 2
 
