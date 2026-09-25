@@ -1,0 +1,190 @@
+name: Claude Review
+
+# When someone with write access comments @claude on a pull request, Claude
+# reviews it and github-actions[bot] submits one formal review. Nothing runs
+# without that request. Only high-severity correctness or security findings
+# block the merge; the review-accepted label releases the block. Claude has
+# no GitHub write access: it writes a JSON file, and claude_review.py posts
+# the review and writes the "review" check on the pull request's head commit.
+#
+# This is a standalone copy of the zuarbase/claude-review workflow. Other
+# Zuar repos call that shared workflow; this public repo cannot call a
+# workflow in a private repo, so the workflow and script live here.
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  pull_request_review:
+    types: [submitted]
+  pull_request:
+    types: [labeled, unlabeled]
+
+jobs:
+  review:
+    # Runs for a `@claude` mention in a pull request comment, an inline
+    # review comment, or a submitted review, and for the override label
+    # being added or removed (which only re-checks the gate). Every other
+    # event the caller forwards is skipped here.
+    if: |
+      (github.event_name == 'pull_request' &&
+       (github.event.action == 'labeled' || github.event.action == 'unlabeled') &&
+       github.event.label.name == 'review-accepted') ||
+      (github.event.sender.type != 'Bot' &&
+       ((github.event_name == 'issue_comment' && github.event.issue.pull_request &&
+         contains(github.event.comment.body, '@claude')) ||
+        (github.event_name == 'pull_request_review_comment' &&
+         contains(github.event.comment.body, '@claude')) ||
+        (github.event_name == 'pull_request_review' &&
+         contains(github.event.review.body, '@claude'))))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # One review per pull request at a time; a second request waits.
+    concurrency:
+      group: claude-review-${{ github.repository }}-${{ github.event.issue.number || github.event.pull_request.number }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      pull-requests: write
+      checks: write # the "review" check on the pull request's head commit
+      id-token: write # AWS OIDC for Bedrock
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+      PR_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
+      ACTOR: ${{ github.event.sender.login }}
+      LABEL_EVENT: ${{ github.event_name == 'pull_request' }}
+      OVERRIDE_LABEL: review-accepted
+      BLOCKING_SEVERITIES: high
+      BLOCKING_CATEGORIES: correctness,security
+    steps:
+      # A comment event carries no head commit, so read it from the pull
+      # request. Only people with write access can request a review, and
+      # pull requests from forks are skipped: a comment runs with this
+      # repo's secrets, and fork code must not run there.
+      - name: Resolve request
+        id: request
+        env:
+          COMMENT_ID: ${{ github.event.comment.id }}
+          COMMENT_API: ${{ github.event_name == 'pull_request_review_comment' && 'pulls/comments' || 'issues/comments' }}
+        run: |
+          pr=$(gh api "repos/$REPO/pulls/$PR_NUMBER")
+          head_sha=$(jq -r .head.sha <<<"$pr")
+          head_repo=$(jq -r .head.repo.full_name <<<"$pr")
+          echo "HEAD_SHA=$head_sha" >> "$GITHUB_ENV"
+          if [ "$head_repo" != "$REPO" ]; then
+            echo "::notice::Pull request comes from a fork ($head_repo); skipped."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$LABEL_EVENT" = "true" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          permission=$(gh api "repos/$REPO/collaborators/$ACTOR/permission" --jq .permission || echo none)
+          case "$permission" in
+            admin|maintain|write) ;;
+            *)
+              echo "::notice::@$ACTOR has $permission access; only people with write access can request a review."
+              echo "run=false" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+          if [ -n "$COMMENT_ID" ]; then
+            gh api --method POST "repos/$REPO/$COMMENT_API/$COMMENT_ID/reactions" -f content=eyes >/dev/null \
+              || echo "::warning::Could not react to the request comment."
+          fi
+          echo "run=true" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout pull request
+        if: steps.request.outputs.run == 'true' && env.LABEL_EVENT == 'false'
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.HEAD_SHA }}
+          fetch-depth: 1
+
+      # The script comes from the base branch, never from the pull request,
+      # so a pull request cannot rewrite the script that grades it. The one
+      # exception is the pull request that first adds the script, when the
+      # base branch does not have it yet.
+      - name: Checkout review script from the base branch
+        if: steps.request.outputs.run == 'true'
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.event.repository.default_branch }}
+          path: .claude-review
+          sparse-checkout: .github/scripts
+          fetch-depth: 1
+
+      - name: Place review script
+        if: steps.request.outputs.run == 'true'
+        run: |
+          if [ ! -f .claude-review/.github/scripts/claude_review.py ]; then
+            echo "::warning::Base branch has no review script yet; using the pull request's copy."
+            git -C .claude-review fetch -q --depth 1 origin "$HEAD_SHA"
+            mkdir -p .claude-review/.github/scripts
+            git -C .claude-review show "$HEAD_SHA:.github/scripts/claude_review.py" > .claude-review/.github/scripts/claude_review.py
+          fi
+
+      - name: Open review check
+        if: steps.request.outputs.run == 'true' && env.LABEL_EVENT == 'false'
+        run: python3 .claude-review/.github/scripts/claude_review.py start
+
+      - name: Configure AWS credentials (OIDC)
+        if: steps.request.outputs.run == 'true' && env.LABEL_EVENT == 'false'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: us-east-1
+
+      - name: Run Claude review
+        if: steps.request.outputs.run == 'true' && env.LABEL_EVENT == 'false'
+        uses: anthropics/claude-code-action@v1
+        with:
+          use_bedrock: "true"
+          # The built-in Actions token, not the Claude GitHub App: the app
+          # cannot submit pull request reviews.
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            You are the automated reviewer for pull request #${{ env.PR_NUMBER }} in ${{ github.repository }}.
+            The pull request is checked out in the working directory.
+
+            Do this:
+            1. Run `gh pr view ${{ env.PR_NUMBER }} --json title,body,baseRefName,files` for context and `gh pr diff ${{ env.PR_NUMBER }}` for the full diff.
+            2. Read surrounding code where you need it to judge a change. Do not modify any file.
+            3. Write your review to `claude-review.json` in the working directory, as JSON with exactly this shape:
+
+               {
+                 "body": "summary in markdown",
+                 "findings": [
+                   {"path": "path/from/repo/root.py", "line": 42, "severity": "high", "category": "correctness", "body": "comment in markdown"}
+                 ]
+               }
+
+            Report every finding you are confident about, at most 20. Classify each one:
+            - severity: "high" only for a defect that will cause wrong behavior, data loss, a security hole, or a regression in shipped functionality, with a concrete failure scenario stated in the comment. "medium" for a likely problem you cannot fully confirm or that only affects edge cases. "low" for everything else.
+            - category: one of correctness, security, performance, tests, style, structure, naming, duplication, docs.
+            Only high-severity correctness or security findings block the merge. Everything else is advisory, so do not inflate severity to make a point.
+
+            Finding rules:
+            - "line" is the line number in the new version of the file and must be a line shown in the diff (an added or context line inside a hunk). Never reference lines outside the diff.
+            - One finding per issue, on the most relevant line. Say what is wrong and, when it is short, how to fix it.
+            - Anything that does not belong on one line goes in "body".
+
+            Summary body: two to six sentences on what the change does and your overall assessment. Do not repeat the findings, do not state a verdict, and do not add a heading or a sign-off.
+
+            The file must be strict JSON. Inside string values use single quotes or backticks instead of double quotes, and write line breaks as \n, never as a literal newline. After writing the file run exactly `python3 -m json.tool claude-review.json`; if it reports an error, fix the file and run it again until it passes.
+
+            Never post to GitHub yourself; the workflow submits the file as the review. Write the file even when the pull request looks fine.
+          claude_args: |
+            --model ${{ secrets.BEDROCK_MODEL_ARN }}
+            --allowedTools "Bash(gh pr view:*),Bash(gh pr diff:*),Bash(python3 -m json.tool claude-review.json),Read,Glob,Grep,Write"
+
+      - name: Submit review
+        if: ${{ !cancelled() && steps.request.outputs.run == 'true' && env.LABEL_EVENT == 'false' }}
+        run: python3 .claude-review/.github/scripts/claude_review.py submit claude-review.json
+
+      - name: Check gate
+        if: ${{ !cancelled() && steps.request.outputs.run == 'true' }}
+        run: python3 .claude-review/.github/scripts/claude_review.py gate
